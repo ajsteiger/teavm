@@ -464,7 +464,7 @@ public class TScanner implements TIterator<String> {
         String[] parts = line.split(delimiterRegex, -1);
         int offset = 0;
         for (String part : parts) {
-            if (offset + part.length() > from && offset >= from) {
+            if (offset >= from && !part.isEmpty()) {
                 return offset;
             }
             // Skip part and the delimiter.
