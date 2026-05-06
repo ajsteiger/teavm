@@ -1,0 +1,221 @@
+<!--
+    Copyright 2026 Alexey Andreev.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+         http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Java Visualizer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ================================================================ -->
+<!--  Toolbar                                                          -->
+<!-- ================================================================ -->
+<div id="toolbar">
+  <h1>☕ Java Visualizer</h1>
+
+  <button id="run-btn">▶ Run</button>
+
+  <button id="prev-btn" disabled>«</button>
+  <span   id="step-counter">–</span>
+  <button id="next-btn" disabled>»</button>
+
+  <input id="step-slider" type="range" min="0" max="0" value="0" disabled>
+
+  <span id="status-msg"></span>
+</div>
+
+<!-- ================================================================ -->
+<!--  Three-panel workspace                                            -->
+<!-- ================================================================ -->
+<div id="workspace">
+
+  <!-- Panel 1 – code editor -->
+  <div class="panel" id="editor-panel">
+    <div class="panel-header">Java Source</div>
+    <div id="editor-container">
+      <textarea id="editor" spellcheck="false">public class Main {
+    public static void main(String[] args) {
+        int n = 5;
+        int sum = 0;
+        for (int i = 1; i &lt;= n; i++) {
+            sum = sum + i;
+        }
+        System.out.println("Sum 1.." + n + " = " + sum);
+    }
+}</textarea>
+      <div id="editor-overlay"></div>
+    </div>
+    <div id="compiler-progress">
+      <span class="spinner"></span>
+      <span id="progress-label">Compiling…</span>
+    </div>
+    <div id="diagnostics-panel"></div>
+  </div>
+
+  <!-- Panel 2 – frames & locals -->
+  <div class="panel" id="frames-panel">
+    <div class="panel-header">Frames &amp; Locals</div>
+    <div id="frames-body">
+      <div class="info-msg">Press ▶ Run to start</div>
+    </div>
+  </div>
+
+  <!-- Panel 3 – heap -->
+  <div class="panel" id="heap-panel">
+    <div class="panel-header">Heap</div>
+    <div id="heap-svg-container">
+      <svg id="heap-svg" xmlns="http://www.w3.org/2000/svg" width="300" height="60">
+        <text x="20" y="36" font-size="12" fill="#999">Heap objects will appear here</text>
+      </svg>
+    </div>
+  </div>
+
+  <!-- Stdout panel – spans all columns (row 2) -->
+  <div class="panel" id="stdout-panel">
+    <div class="panel-header">Output</div>
+    <pre id="stdout-body"></pre>
+  </div>
+
+</div><!-- #workspace -->
+
+<!-- ================================================================ -->
+<!--  Scripts                                                          -->
+<!-- ================================================================ -->
+<script src="visualizer.js"></script>
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ */
+/*  Worker management                                                   */
+/* ------------------------------------------------------------------ */
+let worker = null;
+
+function ensureWorker() {
+    if (worker) {
+        worker.terminate();
+    }
+    worker = new Worker("worker.js");
+    worker.onmessage = handleWorkerMessage;
+    worker.onerror   = (e) => {
+        setStatus("Worker error: " + e.message);
+        setProgress(false);
+    };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Worker message handling                                             */
+/* ------------------------------------------------------------------ */
+function handleWorkerMessage(event) {
+    const msg = event.data;
+    switch (msg.type) {
+        case "status":
+            setStatus(msg.message);
+            break;
+
+        case "diagnostic":
+            showDiagnostic(msg);
+            break;
+
+        case "trace-complete":
+            setProgress(false);
+            document.getElementById("step-slider").disabled = false;
+            document.getElementById("prev-btn").disabled = false;
+            document.getElementById("next-btn").disabled = false;
+            if (msg.truncated) {
+                setStatus("Trace truncated at max steps.");
+            } else {
+                setStatus("Ready — " + msg.trace.length + " steps.");
+            }
+            clearDiagnostics();
+            Visualizer.loadTrace(msg.trace);
+            break;
+
+        case "error":
+            setProgress(false);
+            setStatus("Error: " + msg.message);
+            break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Run button                                                          */
+/* ------------------------------------------------------------------ */
+document.getElementById("run-btn").addEventListener("click", () => {
+    const source    = document.getElementById("editor").value;
+    const mainClass = detectMainClass(source) || "Main";
+
+    clearDiagnostics();
+    setProgress(true, "Compiling…");
+    setStatus("Starting…");
+    document.getElementById("step-slider").disabled = true;
+    document.getElementById("prev-btn").disabled    = true;
+    document.getElementById("next-btn").disabled    = true;
+
+    ensureWorker();
+    worker.postMessage({ type: "compile", source, mainClass });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                             */
+/* ------------------------------------------------------------------ */
+function setStatus(msg) {
+    document.getElementById("status-msg").textContent = msg;
+}
+
+function setProgress(visible, label) {
+    const el = document.getElementById("compiler-progress");
+    if (visible) {
+        el.classList.add("visible");
+        document.getElementById("progress-label").textContent = label || "Working…";
+        document.getElementById("run-btn").disabled = true;
+    } else {
+        el.classList.remove("visible");
+        document.getElementById("run-btn").disabled = false;
+    }
+}
+
+function clearDiagnostics() {
+    document.getElementById("diagnostics-panel").innerHTML = "";
+}
+
+function showDiagnostic(d) {
+    const panel = document.getElementById("diagnostics-panel");
+    const row   = document.createElement("div");
+    const cls   = d.severity === "error" ? "error-msg" : "info-msg";
+    row.className = cls;
+    const loc = d.fileName
+        ? `${d.fileName}:${d.lineNumber}:${d.columnNumber}  `
+        : "";
+    row.textContent = loc + d.message;
+    panel.appendChild(row);
+}
+
+function detectMainClass(source) {
+    const m = /\bpublic\s+class\s+(\w+)/.exec(source);
+    return m ? m[1] : null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Initialise visualizer                                               */
+/* ------------------------------------------------------------------ */
+Visualizer.init();
+</script>
+
+</body>
+</html>
