@@ -49,14 +49,17 @@
   <div class="panel" id="editor-panel">
     <div class="panel-header">Java Source</div>
     <div id="editor-container">
-      <textarea id="editor" spellcheck="false">public class Main {
+      <textarea id="editor" spellcheck="false">public class Fibonacci {
+    public static int fib(int n) {
+        if (n &lt;= 1) { return n; }
+        int a = fib(n - 1);
+        int b = fib(n - 2);
+        return a + b;
+    }
     public static void main(String[] args) {
-        int n = 5;
-        int sum = 0;
-        for (int i = 1; i &lt;= n; i++) {
-            sum = sum + i;
+        for (int i = 0; i &lt;= 6; i++) {
+            System.out.println("fib(" + i + ") = " + fib(i));
         }
-        System.out.println("Sum 1.." + n + " = " + sum);
     }
 }</textarea>
       <div id="editor-overlay"></div>
