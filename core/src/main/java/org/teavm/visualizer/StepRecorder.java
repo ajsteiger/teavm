@@ -107,6 +107,16 @@ public final class StepRecorder {
         return stepCount;
     }
 
+    /**
+     * Resets all recorder state to its initial (empty) values.
+     * Intended for use in unit tests; not meant to be called from instrumented
+     * production code.
+     */
+    static void reset() {
+        stepCount = 0;
+        truncated = false;
+    }
+
     // -----------------------------------------------------------------
     // JS-interop stubs (replaced by @JSBody / Wasm-GC import at build
     // time; provided here as no-op defaults so the class compiles on
