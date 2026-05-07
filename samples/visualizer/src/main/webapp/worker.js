@@ -303,10 +303,15 @@ async function runInstrumented(wasmBytes) {
                             const line = stderrLine;
                             stderrLine = "";
                             if (line.startsWith(VIZ_PREFIX)) {
-                                const parts = line.slice(VIZ_PREFIX.length).split(":");
+                                const raw = line.slice(VIZ_PREFIX.length);
+                                // Protocol: "step:cls:meth:line:...|name=val|name=val"
+                                // Split frames section (before first |) from vars section
+                                const pipeIdx   = raw.indexOf("|");
+                                const framesRaw = pipeIdx >= 0 ? raw.slice(0, pipeIdx) : raw;
+                                const varsRaw   = pipeIdx >= 0 ? raw.slice(pipeIdx + 1) : "";
+                                const parts     = framesRaw.split(":");
                                 if (parts[0] === "step" && parts.length >= 4) {
                                     if (!truncated) {
-                                        // Multi-frame format: step:cls0:meth0:line0:cls1:meth1:line1:...
                                         const frames = [];
                                         for (let fi = 1; fi + 2 < parts.length; fi += 3) {
                                             frames.push({
@@ -315,13 +320,21 @@ async function runInstrumented(wasmBytes) {
                                                 line:      parseInt(parts[fi + 2], 10),
                                             });
                                         }
+                                        const vars = varsRaw
+                                            ? varsRaw.split("|").map(p => {
+                                                const eq = p.indexOf("=");
+                                                return eq >= 0
+                                                    ? { name: p.slice(0, eq), value: p.slice(eq + 1) }
+                                                    : null;
+                                            }).filter(Boolean)
+                                            : [];
                                         const top = frames[frames.length - 1] || {};
                                         trace.push({
                                             line:      top.line || 0,
                                             className: top.className || "?",
                                             method:    top.method || "?",
                                             frames,
-                                            vars:      [],
+                                            vars,
                                             stdout,
                                         });
                                         if (trace.length >= MAX_STEPS) truncated = true;
@@ -352,53 +365,116 @@ async function runInstrumented(wasmBytes) {
 /* ------------------------------------------------------------------ */
 /*  Source-level Java instrumentation                                   */
 /*                                                                      */
-/*  This performs a lightweight text transformation of the user's Java  */
-/*  source to inject StepRecorder.step() calls before each statement.  */
-/*  It is intentionally simple (line-based, no full parser) and works  */
-/*  for straightforward programs.                                       */
+/*  Lightweight line-based transformation.  Injects StepRecorder       */
+/*  enter/exit/step calls.  A preprocessing pass expands single-line   */
+/*  inline returns (e.g. "if (x) { return y; }") to multi-line form   */
+/*  so the instrumenter can correctly inject exit() before every       */
+/*  return path.                                                        */
 /*                                                                      */
-/*  When compiler.wasm is updated to include StepInstrumentationTransformer,
-/*  this transform can be replaced by calling compiler.generateVisualizer()
-/*  which does proper IR-level instrumentation.                         */
+/*  Local variable tracking: primitive typed variables declared at     */
+/*  method-body scope are reported with each step via varPairs, which  */
+/*  the visualizer shows in the Frames & Locals panel.                 */
+/*                                                                      */
+/*  When compiler.wasm gains a generateVisualizer() API this transform  */
+/*  can be replaced with an IR-level call that does it properly.       */
 /* ------------------------------------------------------------------ */
 
 /**
- * Instruments `javaSource` with StepRecorder calls and returns both the
- * instrumented source and the StepRecorder helper source.
+ * Expands single-line blocks that contain a bare return statement so the
+ * main pass can inject exit() before the return.
  *
- * Injects:
- *   - StepRecorder.enter(cls, method)  at the first executable line of each method
- *   - StepRecorder.step(cls, method, line) before every executable line
- *   - StepRecorder.exit()              before explicit return statements (after step)
- *                                      and before the implicit method-closing }
+ * Example:
+ *   if (n <= 1) { return n; }
+ * → if (n <= 1) {
+ *       return n;
+ *   }
  *
- * @param {string} javaSource  - original Java source
- * @param {string} className   - detected or provided class name
+ * Returns { lines, originalLineNos } where originalLineNos[i] is the
+ * 1-based line number in the ORIGINAL source that preprocessed line i
+ * came from.  The step() injections use originalLineNos so that line
+ * highlighting aligns with the editor's unmodified source.
+ */
+function preprocessInlineReturns(rawLines) {
+    const lines          = [];
+    const originalLineNos = [];
+    // Matches: <indent><anything-not-return> { return <expr>; } EOL
+    const re = /^(\s*)((?:[^{]|(?!\breturn\b))*)\{\s*(return\s+[^;]+;)\s*\}\s*$/;
+    for (let i = 0; i < rawLines.length; i++) {
+        const origNo = i + 1;
+        const m = re.exec(rawLines[i]);
+        if (m) {
+            const indent = m[1];
+            const before = m[2].trimEnd();
+            const ret    = m[3];
+            lines.push(`${indent}${before}{`);       originalLineNos.push(origNo);
+            lines.push(`${indent}    ${ret}`);        originalLineNos.push(origNo);
+            lines.push(`${indent}}`);                 originalLineNos.push(origNo);
+        } else {
+            lines.push(rawLines[i]);
+            originalLineNos.push(origNo);
+        }
+    }
+    return { lines, originalLineNos };
+}
+
+/** Parses a method's parameter list and returns [{name, type}] for primitives. */
+function parseMethodParams(paramStr) {
+    const vars = [];
+    if (!paramStr || !paramStr.trim()) return vars;
+    for (const p of paramStr.split(",")) {
+        const m = p.trim().match(/^(int|long|double|float|boolean|char|byte|short|String)\s+(\w+)$/);
+        if (m) vars.push({ name: m[2], type: m[1] });
+    }
+    return vars;
+}
+
+/** Builds the varPairs tail of a StepRecorder.step() call for current vars. */
+function buildVarArgs(vars) {
+    if (vars.length === 0) return "";
+    return ", " + vars.map(v => `"${v.name}", String.valueOf(${v.name})`).join(", ");
+}
+
+/**
+ * Instruments javaSource with StepRecorder calls.
+ *
+ * Injects before each executable line:
+ *   - StepRecorder.enter(cls, meth)          — first executable line of each method
+ *   - StepRecorder.step(cls, meth, line, …)  — every executable line (with var pairs)
+ *   - StepRecorder.exit()                    — before every return statement
+ *                                              before method's implicit closing }
+ *
+ * @param {string} javaSource
+ * @param {string} className
  * @returns {{ instrumentedSource: string, stepRecorderSource: string }}
  */
 function instrumentSource(javaSource, className) {
-    const lines = javaSource.split("\n");
+    const { lines, originalLineNos } = preprocessInlineReturns(javaSource.split("\n"));
     const result = [];
-    let insideMethod   = false;
-    let currentMethod  = "?";
-    let braceDepth     = 0;
-    let pendingEnter   = false;  // inject enter() at next executable line
-    let lastMethodReturnDepth = -1;  // braceDepth when last return was at method level
 
-    const methodPattern  = /^\s*(public|private|protected|static|\s)*(void|int|long|double|float|boolean|String|[A-Z]\w*)\s+(\w+)\s*\(/;
+    let insideMethod          = false;
+    let currentMethod         = "?";
+    let braceDepth            = 0;
+    let pendingEnter          = false;
+    let lastMethodReturnDepth = -1;
+    let methodVars            = [];
+    let pendingMethodParams   = [];
+
+    const methodPattern  = /^\s*(?:public|private|protected|static|\s)*(?:void|int|long|double|float|boolean|String|[A-Z]\w*)\s+(\w+)\s*\(([^)]*)\)/;
     const nonExecPattern = /^\s*(\/\/|\/\*|\*|package\s|import\s|class\s|interface\s|enum\s|@|\}|\{|$)/;
     const returnPattern  = /^\s*return\b/;
+    const localVarRe     = /^\s*(int|long|double|float|boolean|char|byte|short|String)\s+(\w+)\s*=/;
 
     for (let i = 0; i < lines.length; i++) {
         const line    = lines[i];
         const trimmed = line.trim();
         const indent  = line.match(/^(\s*)/)[1];
 
-        // Detect method signature
         const methodMatch = methodPattern.exec(line);
-        if (methodMatch) currentMethod = methodMatch[3];
+        if (methodMatch) {
+            currentMethod       = methodMatch[1];
+            pendingMethodParams = parseMethodParams(methodMatch[2] || "");
+        }
 
-        // Net brace change for this line
         let opens = 0, closes = 0;
         for (const ch of line) {
             if (ch === "{") opens++;
@@ -406,45 +482,51 @@ function instrumentSource(javaSource, className) {
         }
         const newDepth = braceDepth + opens - closes;
 
-        // If this line ends the current method body (depth 2→<2):
-        //   inject exit() BEFORE the closing brace — but only if the last
-        //   method-level statement was NOT a return (avoids unreachable code).
+        // Inject exit() before the method's implicit closing brace (void methods, etc.)
         if (insideMethod && newDepth < 2 && lastMethodReturnDepth !== braceDepth) {
             result.push(`${indent}StepRecorder.exit();`);
         }
 
         const isExec = insideMethod && !nonExecPattern.test(line) && trimmed.length > 0;
         if (isExec) {
-            const lineNo = i + 1;
+            const lineNo  = originalLineNos[i];
+            const varArgs = buildVarArgs(methodVars);
 
-            // First executable line of method: inject enter()
             if (pendingEnter) {
                 result.push(`${indent}StepRecorder.enter("${className}", "${currentMethod}");`);
                 pendingEnter = false;
             }
 
             if (returnPattern.test(line)) {
-                // For return: step() then exit() so the step shows the full frame
-                result.push(`${indent}StepRecorder.step("${className}", "${currentMethod}", ${lineNo});`);
+                // step() then exit() — step shows the return line, exit() pops the frame
+                result.push(`${indent}StepRecorder.step("${className}", "${currentMethod}", ${lineNo}${varArgs});`);
                 result.push(`${indent}StepRecorder.exit();`);
                 if (braceDepth === 2) lastMethodReturnDepth = braceDepth;
             } else {
-                result.push(`${indent}StepRecorder.step("${className}", "${currentMethod}", ${lineNo});`);
-                if (braceDepth === 2) lastMethodReturnDepth = -1;  // reset: non-return at method level
+                result.push(`${indent}StepRecorder.step("${className}", "${currentMethod}", ${lineNo}${varArgs});`);
+                if (braceDepth === 2) lastMethodReturnDepth = -1;
             }
         }
 
         result.push(line);
 
-        // Update brace depth and method-entry state
+        // Record local primitive declarations at method-body depth AFTER step injection
+        // so the var appears from the NEXT step onward (once it has a value).
+        if (insideMethod && braceDepth === 2) {
+            const varMatch = localVarRe.exec(line);
+            if (varMatch) methodVars.push({ name: varMatch[2], type: varMatch[1] });
+        }
+
         braceDepth = newDepth;
         if (braceDepth === 2 && opens > closes && !insideMethod) {
-            insideMethod = true;
-            pendingEnter = true;
+            insideMethod          = true;
+            pendingEnter          = true;
             lastMethodReturnDepth = -1;
+            methodVars            = [...pendingMethodParams];
         } else if (braceDepth < 2) {
-            insideMethod = false;
-            pendingEnter = false;
+            insideMethod  = false;
+            pendingEnter  = false;
+            methodVars    = [];
         }
     }
 
@@ -456,9 +538,13 @@ function instrumentSource(javaSource, className) {
 
 /**
  * Returns the Java source for the StepRecorder helper class (default package).
- * Tracks a call-stack of frames via enter/exit and emits all frames with each step.
- * Output format on stderr:  \0VIZ:step:cls0:meth0:line0:cls1:meth1:line1:...
- * (frames in push order: outermost first, innermost last)
+ * Tracks a call-stack of frames via enter/exit.
+ * Each step() call accepts an optional varargs of name/value string pairs
+ * for the active frame's locals.
+ *
+ * Output format on stderr:
+ *   \0VIZ:step:cls0:meth0:line0:...:clsN:methN:lineN|name=val|name=val
+ *   (frames outermost→innermost; vars for innermost frame only)
  */
 function buildStepRecorderSource() {
     return `
@@ -489,7 +575,7 @@ public final class StepRecorder {
         if (depth > 0) depth--;
     }
 
-    public static void step(String cls, String meth, int line) {
+    public static void step(String cls, String meth, int line, String... varPairs) {
         if (truncated) return;
         if (stepCount >= MAX_STEPS) {
             truncated = true;
@@ -503,6 +589,9 @@ public final class StepRecorder {
             sb.append(":").append(frameClass[i])
               .append(":").append(frameMeth[i])
               .append(":").append(frameLine[i]);
+        }
+        for (int i = 0; i + 1 < varPairs.length; i += 2) {
+            sb.append("|").append(varPairs[i]).append("=").append(varPairs[i + 1]);
         }
         System.err.println(sb.toString());
     }
