@@ -110,7 +110,7 @@ function ensureWorker() {
     if (worker) {
         worker.terminate();
     }
-    worker = new Worker("worker.js");
+    worker = new Worker("worker.js?v=" + Date.now());
     worker.onmessage = handleWorkerMessage;
     worker.onerror   = (e) => {
         setStatus("Worker error: " + e.message);

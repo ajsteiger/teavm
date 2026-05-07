@@ -61,10 +61,10 @@
 /* ------------------------------------------------------------------ */
 /*  Configuration                                                       */
 /* ------------------------------------------------------------------ */
-const COMPILER_RUNTIME_URL = "https://teavm.org/playground/compiler.wasm-runtime.js";
-const COMPILER_WASM_URL    = "https://teavm.org/playground/compiler.wasm";
-const SDK_URL              = "https://teavm.org/playground/compile-classlib-teavm.bin";
-const CLASSLIB_URL         = "https://teavm.org/playground/runtime-classlib-teavm.bin";
+const COMPILER_RUNTIME_URL = "playground/compiler.wasm-runtime.js";
+const COMPILER_WASM_URL    = "playground/compiler.wasm";
+const SDK_URL              = "playground/compile-classlib-teavm.bin";
+const CLASSLIB_URL         = "playground/runtime-classlib-teavm.bin";
 
 /** Maximum number of steps the instrumented program may record. */
 const MAX_STEPS = 10_000;
@@ -72,10 +72,11 @@ const MAX_STEPS = 10_000;
 /* ------------------------------------------------------------------ */
 /*  State                                                               */
 /* ------------------------------------------------------------------ */
-let compilerLib = null;   // teavm-javac CompilerLibrary object
-let compiler    = null;   // reusable Compiler instance
-let sdkBuf      = null;   // Int8Array – javac SDK archive
-let classlibBuf = null;   // Int8Array – TeaVM classlib archive
+let compilerLib    = null;   // teavm-javac CompilerLibrary object
+let compiler       = null;   // reusable Compiler instance
+let runtimeModule  = null;   // imported compiler.wasm-runtime module (load fn)
+let sdkBuf         = null;   // Int8Array – javac SDK archive
+let classlibBuf    = null;   // Int8Array – TeaVM classlib archive
 
 /* ------------------------------------------------------------------ */
 /*  Bootstrap                                                           */
@@ -110,12 +111,13 @@ async function ensureCompiler() {
     // Wrap in an ES module blob so we can `import()` it.
     const runtimeBlob = new Blob([runtimeText], { type: "text/javascript" });
     const runtimeUrl  = URL.createObjectURL(runtimeBlob);
-    let runtimeModule;
+    let loadedModule;
     try {
-        runtimeModule = await import(runtimeUrl);
+        loadedModule = await import(runtimeUrl);
     } finally {
         URL.revokeObjectURL(runtimeUrl);
     }
+    runtimeModule = loadedModule;  // save for use in runInstrumented()
 
     postStatus("Loading compiler.wasm…");
     const teavm = await runtimeModule.load(COMPILER_WASM_URL);
@@ -175,8 +177,8 @@ async function runCompilation(javaSource, mainClass) {
     postStatus("Compiling…");
     compiler.clearSourceFiles();
     compiler.clearOutputFiles();
-    compiler.addSourceFile(detectedClass + ".java",         instrumentedSource);
-    compiler.addSourceFile("org/teavm/visualizer/StepRecorder.java", stepRecorderSource);
+    compiler.addSourceFile(detectedClass + ".java",   instrumentedSource);
+    compiler.addSourceFile("StepRecorder.java",        stepRecorderSource);
 
     // Collect diagnostics
     const diagnostics = [];
@@ -186,7 +188,7 @@ async function runCompilation(javaSource, mainClass) {
     try {
         compileOk = compiler.compile();
     } finally {
-        diagReg.destroy();
+        if (diagReg && typeof diagReg.destroy === "function") diagReg.destroy();
     }
 
     for (const d of diagnostics) {
@@ -207,13 +209,23 @@ async function runCompilation(javaSource, mainClass) {
 
     // ---- 4. Generate Wasm from class files --------------------------
     postStatus("Generating WebAssembly…");
+
+    // Use detectMainClasses() to find the entry point reliably
+    let mainClassForWasm = detectedClass;
+    try {
+        const mains = compiler.detectMainClasses();
+        if (mains && mains.length > 0) {
+            mainClassForWasm = mains[0];
+        }
+    } catch (_) { /* ignore, fall back to detectedClass */ }
+
     const wasmDiags = [];
     const wasmDiagReg = compiler.onDiagnostic((d) => wasmDiags.push(d));
     let wasmOk;
     try {
-        wasmOk = compiler.generateWebAssembly({ outputName: "app", mainClass: detectedClass });
+        wasmOk = compiler.generateWebAssembly({ outputName: "app", mainClass: mainClassForWasm });
     } finally {
-        wasmDiagReg.destroy();
+        if (wasmDiagReg && typeof wasmDiagReg.destroy === "function") wasmDiagReg.destroy();
     }
 
     for (const d of wasmDiags) {
@@ -232,17 +244,28 @@ async function runCompilation(javaSource, mainClass) {
         return;
     }
 
-    // ---- 5. Retrieve the Wasm module bytes + runtime ----------------
-    const wasmBytes   = compiler.getWebAssemblyOutputFile("app.wasm");
-    const runtimeData = compiler.getWebAssemblyOutputFile("app.wasm-runtime.js");
+    // ---- 5. Retrieve the Wasm module bytes --------------------------
+    // The same compiler.wasm-runtime.js load() function works for user wasm too.
+    // Output is just "app.wasm"; there is no separate runtime output file.
+    let wasmBytes = compiler.getWebAssemblyOutputFile("app.wasm");
+    if (!wasmBytes) {
+        // Fallback: list actual output files and try the first .wasm one
+        const outputFiles = compiler.listWebAssemblyOutputFiles
+            ? compiler.listWebAssemblyOutputFiles()
+            : [];
+        const wasmFile = outputFiles.find(f => f.endsWith(".wasm"));
+        if (wasmFile) {
+            wasmBytes = compiler.getWebAssemblyOutputFile(wasmFile);
+        }
+    }
 
-    if (!wasmBytes || !runtimeData) {
+    if (!wasmBytes) {
         throw new Error("Generated Wasm output not found.");
     }
 
     // ---- 6. Run the instrumented Wasm and collect the trace ---------
     postStatus("Running…");
-    const { trace, truncated, stdout } = await runInstrumented(wasmBytes, runtimeData);
+    const { trace, truncated, stdout } = await runInstrumented(wasmBytes);
 
     postStatus("Done.");
     self.postMessage({ type: "trace-complete", trace, truncated, stdout });
@@ -251,99 +274,67 @@ async function runCompilation(javaSource, mainClass) {
 /* ------------------------------------------------------------------ */
 /*  Run instrumented Wasm and collect trace                            */
 /* ------------------------------------------------------------------ */
-async function runInstrumented(wasmBytes, runtimeData) {
+async function runInstrumented(wasmBytes) {
     const trace   = [];
     let   truncated = false;
     let   stdout  = "";
 
-    // Call stack tracking
-    const callStack = [];
-
-    // Pending variable captures for the current step
-    let pendingVars = [];
-
-    // $vizStep is called by StepRecorder.step() in the generated Wasm.
-    // It fires AFTER enterMethod(), so callStack is already updated.
-    globalThis.$vizStep = (className, method, line) => {
-        if (trace.length >= MAX_STEPS) {
-            truncated = true;
-            return;
-        }
-        // Flush pending vars into the most recent frame
-        const vars = pendingVars.splice(0);
-        trace.push({
-            line,
-            className,
-            method,
-            frames: callStack.map((f) => ({ ...f })),
-            vars,
-            stdout,
-        });
-    };
-
-    globalThis.$vizEnterMethod = (className, method) => {
-        callStack.push({ className, method, line: 0 });
-    };
-
-    globalThis.$vizExitMethod = () => {
-        callStack.pop();
-    };
-
-    globalThis.$vizCaptureVar = (name, value) => {
-        pendingVars.push({ name, value });
-    };
-
-    globalThis.$vizStepLimitReached = () => {
-        truncated = true;
-    };
-
-    // Capture stdout: TeaVM routes System.out.println → console.log
-    // in the generated Wasm.  We intercept it here.
-    const origLog = console.log;
-    console.log = (...args) => {
-        stdout += args.map(String).join(" ") + "\n";
-    };
+    const VIZ_PREFIX = "\u0000VIZ:";
 
     try {
-        // Load the runtime JS from the generated output.
-        const runtimeText = new TextDecoder().decode(
-            new Uint8Array(runtimeData.buffer, runtimeData.byteOffset, runtimeData.byteLength)
-        );
-        const runtimeBlob = new Blob([runtimeText], { type: "text/javascript" });
-        const runtimeUrl  = URL.createObjectURL(runtimeBlob);
-        let loadFn;
-        try {
-            const mod = await import(runtimeUrl);
-            loadFn = mod.load;
-        } finally {
-            URL.revokeObjectURL(runtimeUrl);
-        }
-
-        // Instantiate the user Wasm.  The `load()` function from the runtime
-        // handles imports and exports wired to TeaVM's classlib.
-        const wasmBlob = new Blob(
-            [new Uint8Array(wasmBytes.buffer, wasmBytes.byteOffset, wasmBytes.byteLength)],
-            { type: "application/wasm" }
-        );
-        const wasmUrl = URL.createObjectURL(wasmBlob);
-        try {
-            const userTeavm = await loadFn(wasmUrl);
-            // Run the main() entry point.
-            await userTeavm.exports.main([]);
-        } finally {
-            URL.revokeObjectURL(wasmUrl);
-        }
+        // The same load() from compiler.wasm-runtime.js works for user-generated wasm.
+        // Pass bytes directly (Int8Array accepted alongside URL strings).
+        const userTeavm = await runtimeModule.load(wasmBytes, {
+            installImports(o) {
+                // Wire up stdout/stderr character-by-character handlers
+                let stdoutLine = "";
+                let stderrLine = "";
+                if (o.teavmConsole) {
+                    o.teavmConsole.putcharStdout = (ch) => {
+                        if (ch === 0x0A) {
+                            stdout += stdoutLine + "\n";
+                            stdoutLine = "";
+                        } else {
+                            stdoutLine += String.fromCharCode(ch);
+                        }
+                    };
+                    o.teavmConsole.putcharStderr = (ch) => {
+                        if (ch === 0x0A) {
+                            const line = stderrLine;
+                            stderrLine = "";
+                            if (line.startsWith(VIZ_PREFIX)) {
+                                const parts = line.slice(VIZ_PREFIX.length).split(":");
+                                if (parts[0] === "step" && parts.length >= 4) {
+                                    const [, className, method, lineNo] = parts;
+                                    if (!truncated) {
+                                        trace.push({
+                                            line:      parseInt(lineNo, 10),
+                                            className,
+                                            method,
+                                            frames:    [{ className, method, line: parseInt(lineNo, 10) }],
+                                            vars:      [],
+                                            stdout,
+                                        });
+                                        if (trace.length >= MAX_STEPS) truncated = true;
+                                    }
+                                } else if (parts[0] === "truncated") {
+                                    truncated = true;
+                                }
+                            } else {
+                                stdout += line + "\n";
+                            }
+                        } else {
+                            stderrLine += String.fromCharCode(ch);
+                        }
+                    };
+                }
+            }
+        });
+        // Run the main() entry point.
+        await userTeavm.exports.main([]);
     } catch (e) {
         // A thrown exception from user code is normal (e.g. unhandled RuntimeException).
-        // Record it in stdout and continue to render whatever trace was collected.
         stdout += "\n[Exception: " + String(e) + "]\n";
-    } finally {
-        console.log = origLog;
-        delete globalThis.$vizStep;
-        delete globalThis.$vizEnterMethod;
-        delete globalThis.$vizExitMethod;
-        delete globalThis.$vizCaptureVar;
-        delete globalThis.$vizStepLimitReached;
     }
 
     return { trace, truncated, stdout };
@@ -387,31 +378,26 @@ function instrumentSource(javaSource, className) {
     const methodPattern   = /^\s*(public|private|protected|static|\s)*(void|int|long|double|float|boolean|String|[A-Z]\w*)\s+(\w+)\s*\(/;
     const nonExecPattern  = /^\s*(\/\/|\/\*|\*|package\s|import\s|class\s|interface\s|enum\s|@|\}|\{|$)/;
 
-    let importAdded = false;
-    let packageLine = -1;
-
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-
-        // Track package line to insert our import after it
-        if (!importAdded && /^\s*package\s/.test(line)) {
-            packageLine = result.length;
-            result.push(line);
-            continue;
-        }
-
-        // Insert our import right after package line (or at top if no package)
-        if (!importAdded && (/^\s*import\s/.test(line) || result.length > 0)) {
-            if (packageLine >= 0) {
-                result.push("import org.teavm.visualizer.StepRecorder;");
-            }
-            importAdded = true;
-        }
 
         // Detect method declarations
         const methodMatch = methodPattern.exec(line);
         if (methodMatch) {
             currentMethod = methodMatch[3];
+        }
+
+        // Emit step call before executable lines inside a method.
+        // NOTE: This check must happen BEFORE brace counting so that the method
+        // signature line (which opens braceDepth to 2 and sets insideMethod=true)
+        // is NOT treated as executable — otherwise StepRecorder.step() would be
+        // injected at class-body scope, producing a compile error.
+        if (insideMethod && !nonExecPattern.test(line) && line.trim().length > 0) {
+            const lineNo = i + 1;
+            const indent = (line.match(/^(\s*)/) || ["", ""])[1];
+            result.push(
+                `${indent}StepRecorder.step("${className}", "${currentMethod}", ${lineNo});`
+            );
         }
 
         // Track brace depth to know when we are inside a method body
@@ -430,20 +416,7 @@ function instrumentSource(javaSource, className) {
             }
         }
 
-        // Emit step call before executable lines inside a method
-        if (insideMethod && !nonExecPattern.test(line) && line.trim().length > 0) {
-            const lineNo = i + 1;
-            const indent = (line.match(/^(\s*)/) || ["", ""])[1];
-            result.push(
-                `${indent}StepRecorder.step("${className}", "${currentMethod}", ${lineNo});`
-            );
-        }
-
         result.push(line);
-    }
-
-    if (!importAdded) {
-        result.unshift("import org.teavm.visualizer.StepRecorder;");
     }
 
     return {
@@ -453,17 +426,14 @@ function instrumentSource(javaSource, className) {
 }
 
 /**
- * Returns the Java source for the StepRecorder helper class that the
- * instrumented code calls.  The callbacks use @JSBody so that they
- * fire into globalThis.$vizStep etc. in this worker.
+ * Returns the Java source for the StepRecorder helper class (default package).
+ * Uses System.err with a sentinel prefix so the worker can parse step events
+ * without needing @JSBody / JSO interop.
  */
 function buildStepRecorderSource() {
     return `
-package org.teavm.visualizer;
-
-import org.teavm.jso.JSBody;
-
 public final class StepRecorder {
+    private static final String PREFIX = "\\u0000VIZ:";
     public static final int MAX_STEPS = ${MAX_STEPS};
     private static int stepCount;
     private static boolean truncated;
@@ -474,46 +444,15 @@ public final class StepRecorder {
         if (truncated) return;
         if (stepCount >= MAX_STEPS) {
             truncated = true;
-            jsStepLimitReached();
+            System.err.println(PREFIX + "truncated");
             return;
         }
         stepCount++;
-        jsStep(className, methodName, line);
-    }
-
-    public static void enterMethod(String className, String methodName) {
-        if (!truncated) jsEnterMethod(className, methodName);
-    }
-
-    public static void exitMethod() {
-        if (!truncated) jsExitMethod();
-    }
-
-    public static void captureVar(String name, Object value) {
-        if (!truncated) jsCaptureVar(name, value == null ? "null" : value.toString());
+        System.err.println(PREFIX + "step:" + className + ":" + methodName + ":" + line);
     }
 
     public static boolean isTruncated() { return truncated; }
     public static int getStepCount()    { return stepCount; }
-
-    @JSBody(params = {"className", "method", "line"},
-            script = "if(typeof $vizStep==='function')$vizStep(className,method,line);")
-    private static native void jsStep(String className, String method, int line);
-
-    @JSBody(params = {"className", "method"},
-            script = "if(typeof $vizEnterMethod==='function')$vizEnterMethod(className,method);")
-    private static native void jsEnterMethod(String className, String method);
-
-    @JSBody(params = {}, script = "if(typeof $vizExitMethod==='function')$vizExitMethod();")
-    private static native void jsExitMethod();
-
-    @JSBody(params = {"name", "value"},
-            script = "if(typeof $vizCaptureVar==='function')$vizCaptureVar(name,value);")
-    private static native void jsCaptureVar(String name, String value);
-
-    @JSBody(params = {},
-            script = "if(typeof $vizStepLimitReached==='function')$vizStepLimitReached();")
-    private static native void jsStepLimitReached();
 }
 `.trim();
 }
