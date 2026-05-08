@@ -49,17 +49,31 @@
   <div class="panel" id="editor-panel">
     <div class="panel-header">Java Source</div>
     <div id="editor-container">
-      <textarea id="editor" spellcheck="false">public class Fibonacci {
-    public static int fib(int n) {
-        if (n &lt;= 1) { return n; }
-        int a = fib(n - 1);
-        int b = fib(n - 2);
-        return a + b;
-    }
-    public static void main(String[] args) {
-        for (int i = 0; i &lt;= 6; i++) {
-            System.out.println("fib(" + i + ") = " + fib(i));
+      <textarea id="editor" spellcheck="false">class MathHelper {
+    static int factorial(int n) {
+        int result = 1;
+        int i = 2;
+        while (i &lt;= n) {
+            result = result * i;
+            i = i + 1;
         }
+        return result;
+    }
+    static int choose(int n, int k) {
+        int nFact = factorial(n);
+        int kFact = factorial(k);
+        int nkFact = factorial(n - k);
+        return nFact / (kFact * nkFact);
+    }
+}
+public class Main {
+    public static void main(String[] args) {
+        int c42 = MathHelper.choose(4, 2);
+        int c53 = MathHelper.choose(5, 3);
+        int c63 = MathHelper.choose(6, 3);
+        System.out.println("C(4,2) = " + c42);
+        System.out.println("C(5,3) = " + c53);
+        System.out.println("C(6,3) = " + c63);
     }
 }</textarea>
       <div id="editor-overlay"></div>

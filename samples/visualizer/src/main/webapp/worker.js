@@ -437,28 +437,30 @@ function buildVarArgs(vars) {
 /**
  * Instruments javaSource with StepRecorder calls.
  *
- * Injects before each executable line:
- *   - StepRecorder.enter(cls, meth)          — first executable line of each method
- *   - StepRecorder.step(cls, meth, line, …)  — every executable line (with var pairs)
- *   - StepRecorder.exit()                    — before every return statement
- *                                              before method's implicit closing }
+ * Supports multiple top-level classes and nested/inner classes by maintaining
+ * a classStack so that method-body depth is always classBodyDepth+1.
  *
  * @param {string} javaSource
- * @param {string} className
+ * @param {string} className  - fallback class name (from compiler detection)
  * @returns {{ instrumentedSource: string, stepRecorderSource: string }}
  */
 function instrumentSource(javaSource, className) {
     const { lines, originalLineNos } = preprocessInlineReturns(javaSource.split("\n"));
     const result = [];
 
+    let braceDepth            = 0;
     let insideMethod          = false;
     let currentMethod         = "?";
-    let braceDepth            = 0;
     let pendingEnter          = false;
     let lastMethodReturnDepth = -1;
     let methodVars            = [];
     let pendingMethodParams   = [];
 
+    // classStack: [{ name, bodyDepth }]
+    // bodyDepth = braceDepth INSIDE the class body (1 for top-level, 2 for inner class, …)
+    const classStack = [];
+
+    const classPattern   = /^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*class\s+(\w+)/;
     const methodPattern  = /^\s*(?:public|private|protected|static|\s)*(?:void|int|long|double|float|boolean|String|[A-Z]\w*)\s+(\w+)\s*\(([^)]*)\)/;
     const nonExecPattern = /^\s*(\/\/|\/\*|\*|package\s|import\s|class\s|interface\s|enum\s|@|\}|\{|$)/;
     const returnPattern  = /^\s*return\b/;
@@ -469,6 +471,12 @@ function instrumentSource(javaSource, className) {
         const trimmed = line.trim();
         const indent  = line.match(/^(\s*)/)[1];
 
+        // Snapshot class context for this iteration (before any stack mutations)
+        const curClassName    = classStack.length > 0 ? classStack[classStack.length - 1].name : className;
+        const curClassBodyDep = classStack.length > 0 ? classStack[classStack.length - 1].bodyDepth : 1;
+        const mbd             = curClassBodyDep + 1;  // method body depth for current class context
+
+        const classMatch  = classPattern.exec(line);
         const methodMatch = methodPattern.exec(line);
         if (methodMatch) {
             currentMethod       = methodMatch[1];
@@ -482,8 +490,8 @@ function instrumentSource(javaSource, className) {
         }
         const newDepth = braceDepth + opens - closes;
 
-        // Inject exit() before the method's implicit closing brace (void methods, etc.)
-        if (insideMethod && newDepth < 2 && lastMethodReturnDepth !== braceDepth) {
+        // Inject exit() before method's implicit closing brace
+        if (insideMethod && newDepth < mbd && lastMethodReturnDepth !== braceDepth) {
             result.push(`${indent}StepRecorder.exit();`);
         }
 
@@ -493,37 +501,48 @@ function instrumentSource(javaSource, className) {
             const varArgs = buildVarArgs(methodVars);
 
             if (pendingEnter) {
-                result.push(`${indent}StepRecorder.enter("${className}", "${currentMethod}");`);
+                result.push(`${indent}StepRecorder.enter("${curClassName}", "${currentMethod}");`);
                 pendingEnter = false;
             }
 
             if (returnPattern.test(line)) {
-                // step() then exit() — step shows the return line, exit() pops the frame
-                result.push(`${indent}StepRecorder.step("${className}", "${currentMethod}", ${lineNo}${varArgs});`);
+                result.push(`${indent}StepRecorder.step("${curClassName}", "${currentMethod}", ${lineNo}${varArgs});`);
                 result.push(`${indent}StepRecorder.exit();`);
-                if (braceDepth === 2) lastMethodReturnDepth = braceDepth;
+                if (braceDepth === mbd) lastMethodReturnDepth = braceDepth;
             } else {
-                result.push(`${indent}StepRecorder.step("${className}", "${currentMethod}", ${lineNo}${varArgs});`);
-                if (braceDepth === 2) lastMethodReturnDepth = -1;
+                result.push(`${indent}StepRecorder.step("${curClassName}", "${currentMethod}", ${lineNo}${varArgs});`);
+                if (braceDepth === mbd) lastMethodReturnDepth = -1;
             }
         }
 
         result.push(line);
 
-        // Record local primitive declarations at method-body depth AFTER step injection
-        // so the var appears from the NEXT step onward (once it has a value).
-        if (insideMethod && braceDepth === 2) {
+        // Track local primitive declarations at method-body depth (after step injection)
+        if (insideMethod && braceDepth === mbd) {
             const varMatch = localVarRe.exec(line);
             if (varMatch) methodVars.push({ name: varMatch[2], type: varMatch[1] });
         }
 
         braceDepth = newDepth;
-        if (braceDepth === 2 && opens > closes && !insideMethod) {
+
+        // Update class stack: push new class, pop closed classes
+        if (classMatch && opens > 0) {
+            classStack.push({ name: classMatch[1], bodyDepth: braceDepth });
+        }
+        while (classStack.length > 0 && braceDepth < classStack[classStack.length - 1].bodyDepth) {
+            classStack.pop();
+        }
+
+        // Update method state using the NEW class context after stack mutations
+        const newClassBodyDep = classStack.length > 0 ? classStack[classStack.length - 1].bodyDepth : 1;
+        const newMbd          = newClassBodyDep + 1;
+
+        if (braceDepth === newMbd && opens > closes && !insideMethod) {
             insideMethod          = true;
             pendingEnter          = true;
             lastMethodReturnDepth = -1;
             methodVars            = [...pendingMethodParams];
-        } else if (braceDepth < 2) {
+        } else if (insideMethod && braceDepth < newMbd) {
             insideMethod  = false;
             pendingEnter  = false;
             methodVars    = [];
