@@ -25,53 +25,55 @@ const Visualizer = (() => {
     /* ------------------------------------------------------------------ */
     /*  DOM refs (populated in init())                                      */
     /* ------------------------------------------------------------------ */
-    let editorEl, overlayEl, framesBodyEl, heapSvgEl, stdoutBodyEl;
+    let editorEl, editorHighlightEl, overlayEl, framesBodyEl, heapSvgEl, stdoutBodyEl;
     let stepCounterEl, stepSliderEl, prevBtnEl, nextBtnEl;
 
-    // Character metrics for the plain-textarea editor line highlighting
-    let lineHeightPx  = 0;
-    let editorPadPx   = 8;
+    // Guard against duplicate event listener registration (init() may be
+    // called again on tab-switch / trace reset).
+    let listenersAttached = false;
 
     /* ------------------------------------------------------------------ */
     /*  init                                                                */
     /* ------------------------------------------------------------------ */
     function init() {
-        editorEl      = document.getElementById("editor");
-        overlayEl     = document.getElementById("editor-overlay");
-        framesBodyEl  = document.getElementById("frames-body");
-        heapSvgEl     = document.getElementById("heap-svg");
-        stdoutBodyEl  = document.getElementById("stdout-body");
-        stepCounterEl = document.getElementById("step-counter");
-        stepSliderEl  = document.getElementById("step-slider");
-        prevBtnEl     = document.getElementById("prev-btn");
-        nextBtnEl     = document.getElementById("next-btn");
+        editorEl          = document.getElementById("editor");
+        editorHighlightEl = document.getElementById("editor-highlight");
+        overlayEl         = document.getElementById("editor-overlay");
+        framesBodyEl      = document.getElementById("frames-body");
+        heapSvgEl         = document.getElementById("heap-svg");
+        stdoutBodyEl      = document.getElementById("stdout-body");
+        stepCounterEl     = document.getElementById("step-counter");
+        stepSliderEl      = document.getElementById("step-slider");
+        prevBtnEl         = document.getElementById("prev-btn");
+        nextBtnEl         = document.getElementById("next-btn");
 
-        // Compute line height from a sample text node
-        computeLineHeight();
+        // Reset trace state
+        trace      = [];
+        currentIdx = -1;
 
-        prevBtnEl.addEventListener("click", () => goToStep(currentIdx - 1));
-        nextBtnEl.addEventListener("click", () => goToStep(currentIdx + 1));
+        // Re-render syntax highlight for whatever source is in the editor
+        renderHighlightPre(editorEl.value, 0);
+
+        if (listenersAttached) { return; }
+        listenersAttached = true;
+
+        prevBtnEl.addEventListener("click",  () => goToStep(currentIdx - 1));
+        nextBtnEl.addEventListener("click",  () => goToStep(currentIdx + 1));
         stepSliderEl.addEventListener("input", () => goToStep(Number(stepSliderEl.value)));
 
-        // Recompute line height if editor is resized
-        new ResizeObserver(computeLineHeight).observe(editorEl);
-    }
+        // Keep the pre-overlay in sync when the textarea is scrolled
+        editorEl.addEventListener("scroll", () => {
+            if (!editorHighlightEl) { return; }
+            editorHighlightEl.scrollTop  = editorEl.scrollTop;
+            editorHighlightEl.scrollLeft = editorEl.scrollLeft;
+        });
 
-    function computeLineHeight() {
-        // Create a hidden span in a clone of the editor's computed style
-        const el = document.createElement("pre");
-        el.style.cssText = window.getComputedStyle(editorEl).cssText;
-        el.style.visibility = "hidden";
-        el.style.position = "absolute";
-        el.style.height = "auto";
-        el.style.width = "auto";
-        el.textContent = "A";
-        document.body.appendChild(el);
-        lineHeightPx = el.getBoundingClientRect().height;
-        el.remove();
-        if (lineHeightPx < 4) {
-            lineHeightPx = 20; // fallback
-        }
+        // Re-render syntax highlight when the user types
+        editorEl.addEventListener("input", () => {
+            const active = (trace.length > 0 && currentIdx >= 0)
+                ? trace[currentIdx].line : 0;
+            renderHighlightPre(editorEl.value, active);
+        });
     }
 
     /* ------------------------------------------------------------------ */
@@ -131,39 +133,31 @@ const Visualizer = (() => {
     /*  Panel 1 – line highlight                                            */
     /* ------------------------------------------------------------------ */
     function highlightLine(lineNo) {
-        // Clear previous highlights
-        while (overlayEl.firstChild) {
-            overlayEl.removeChild(overlayEl.firstChild);
-        }
-        if (!lineNo || lineNo < 1) {
-            return;
-        }
+        if (!editorHighlightEl) { return; }
 
-        const scrollTop = editorEl.scrollTop;
-        const top  = editorPadPx + (lineNo - 1) * lineHeightPx - scrollTop;
-        const bar  = document.createElement("div");
-        bar.className = "line-highlight";
-        bar.style.top    = top + "px";
-        bar.style.height = lineHeightPx + "px";
-        overlayEl.appendChild(bar);
+        // Toggle .hl-active on the matching .code-line element — no pixel math
+        const codelines = editorHighlightEl.querySelectorAll(".code-line");
+        codelines.forEach((el, i) => {
+            el.classList.toggle("hl-active", i + 1 === lineNo);
+        });
 
-        // Scroll editor so the highlighted line is visible
+        if (!lineNo || lineNo < 1) { return; }
+
+        // Auto-scroll editor so active line is visible
+        const lhRaw = window.getComputedStyle(editorEl).lineHeight;
+        const lineH = lhRaw === "normal" ? 20 : parseFloat(lhRaw);
+        const padTop = parseFloat(window.getComputedStyle(editorEl).paddingTop) || 8;
         const editorH  = editorEl.clientHeight;
-        const lineTop  = editorPadPx + (lineNo - 1) * lineHeightPx;
-        const lineBot  = lineTop + lineHeightPx;
+        const lineTop  = padTop + (lineNo - 1) * lineH;
+        const lineBot  = lineTop + lineH;
+        const scrollTop = editorEl.scrollTop;
+
         if (lineTop < scrollTop + 40 || lineBot > scrollTop + editorH - 40) {
             editorEl.scrollTop = lineTop - editorH / 3;
-            // Re-render overlay after scroll
+            editorHighlightEl.scrollTop = editorEl.scrollTop;
             requestAnimationFrame(() => highlightLine(lineNo));
         }
     }
-
-    // Re-render highlight when the editor is scrolled
-    window.addEventListener("scroll", () => {
-        if (trace.length > 0 && currentIdx >= 0) {
-            highlightLine(trace[currentIdx].line);
-        }
-    }, true);
 
     /* ------------------------------------------------------------------ */
     /*  Panel 2 – frames & locals                                           */
@@ -230,13 +224,12 @@ const Visualizer = (() => {
         const ns  = "http://www.w3.org/2000/svg";
         const svg = heapSvgEl;
 
-        // Clear previous
         while (svg.firstChild) {
             svg.removeChild(svg.firstChild);
         }
 
         // Arrowhead marker
-        const defs  = document.createElementNS(ns, "defs");
+        const defs   = document.createElementNS(ns, "defs");
         const marker = document.createElementNS(ns, "marker");
         marker.setAttribute("id", "arrowhead");
         marker.setAttribute("markerWidth", "8");
@@ -251,7 +244,6 @@ const Visualizer = (() => {
         defs.appendChild(marker);
         svg.appendChild(defs);
 
-        // Collect heap objects from vars using the "@ID:Type{...}" convention
         const objects = parseHeapObjects(step.vars || []);
 
         if (objects.length === 0) {
@@ -266,79 +258,108 @@ const Visualizer = (() => {
         }
 
         const BOX_W    = 180;
-        const ROW_H    = 16;
+        const ROW_H    = 18;
         const HEADER_H = 22;
-        const PAD_X    = 30;
-        const PAD_Y    = 30;
-        const COL_GAP  = 40;
+        const PAD_X    = 20;
+        const PAD_Y    = 20;
+        const COL_GAP  = 50;
 
+        // Pass 1: compute box positions so arrows know their targets
+        const boxPos = {};   // id -> { x, y, w, h }
         let x = PAD_X;
+        for (const obj of objects) {
+            const boxH = HEADER_H + obj.fields.length * ROW_H + 8;
+            boxPos[obj.id] = { x, y: PAD_Y, w: BOX_W, h: boxH };
+            x += BOX_W + COL_GAP;
+        }
+        const totalW = x;
         let maxY = PAD_Y;
 
-        for (const obj of objects) {
-            const fieldCount = obj.fields.length;
-            const boxH = HEADER_H + fieldCount * ROW_H + 8;
+        // Pass 2: draw boxes
+        const arrowSpecs = [];   // { x1, y1, x2, y2 }
 
-            // Group
+        for (const obj of objects) {
+            const { x: bx, y: by, w: bw, h: bh } = boxPos[obj.id];
+            maxY = Math.max(maxY, by + bh);
+
             const g = document.createElementNS(ns, "g");
             g.setAttribute("class", "heap-obj");
             g.setAttribute("data-id", obj.id);
 
-            // Background rect
             const rect = document.createElementNS(ns, "rect");
-            rect.setAttribute("x", x);
-            rect.setAttribute("y", PAD_Y);
-            rect.setAttribute("width", BOX_W);
-            rect.setAttribute("height", boxH);
+            rect.setAttribute("x", bx);
+            rect.setAttribute("y", by);
+            rect.setAttribute("width", bw);
+            rect.setAttribute("height", bh);
             rect.setAttribute("rx", "4");
             g.appendChild(rect);
 
-            // Header: "@1 ClassName"
             const titleText = document.createElementNS(ns, "text");
-            titleText.setAttribute("x", x + 8);
-            titleText.setAttribute("y", PAD_Y + 15);
+            titleText.setAttribute("x", bx + 8);
+            titleText.setAttribute("y", by + 15);
             titleText.setAttribute("class", "heap-obj-title");
             titleText.textContent = `@${obj.id} ${obj.typeName}`;
             g.appendChild(titleText);
 
-            // Separator line
             const sep = document.createElementNS(ns, "line");
-            sep.setAttribute("x1", x);
-            sep.setAttribute("y1", PAD_Y + HEADER_H);
-            sep.setAttribute("x2", x + BOX_W);
-            sep.setAttribute("y2", PAD_Y + HEADER_H);
+            sep.setAttribute("x1", bx);
+            sep.setAttribute("y1", by + HEADER_H);
+            sep.setAttribute("x2", bx + bw);
+            sep.setAttribute("y2", by + HEADER_H);
             sep.setAttribute("stroke", "#3498db");
             sep.setAttribute("stroke-width", "1");
             g.appendChild(sep);
 
-            // Fields
             obj.fields.forEach((f, fi) => {
-                const rowY = PAD_Y + HEADER_H + fi * ROW_H + ROW_H - 3;
+                const rowY = by + HEADER_H + fi * ROW_H + ROW_H - 3;
+                const isPtr = /^@\d+$/.test(f.value.trim());
 
                 const nameT = document.createElementNS(ns, "text");
-                nameT.setAttribute("x", x + 8);
+                nameT.setAttribute("x", bx + 8);
                 nameT.setAttribute("y", rowY);
                 nameT.setAttribute("class", "heap-field-name");
                 nameT.textContent = f.name;
                 g.appendChild(nameT);
 
                 const valT = document.createElementNS(ns, "text");
-                valT.setAttribute("x", x + 90);
+                valT.setAttribute("x", bx + 90);
                 valT.setAttribute("y", rowY);
-                valT.setAttribute("class", "heap-field-val");
+                valT.setAttribute("class", isPtr ? "heap-field-ptr" : "heap-field-val");
                 valT.textContent = f.value;
                 g.appendChild(valT);
+
+                // Collect arrow source/target for pass 3
+                if (isPtr) {
+                    const targetId = f.value.trim().slice(1);
+                    const tbox = boxPos[targetId];
+                    if (tbox) {
+                        const arrowY = rowY - 4;
+                        arrowSpecs.push({
+                            x1: bx + bw,     y1: arrowY,
+                            x2: tbox.x,      y2: tbox.y + tbox.h / 2,
+                        });
+                    }
+                }
             });
 
             svg.appendChild(g);
-
-            x += BOX_W + COL_GAP;
-            maxY = Math.max(maxY, PAD_Y + boxH);
         }
 
-        svg.setAttribute("width",  Math.max(x, 300));
+        // Pass 3: draw arrows on top of boxes
+        for (const { x1, y1, x2, y2 } of arrowSpecs) {
+            const path = document.createElementNS(ns, "path");
+            const dx = (x2 - x1) / 2;
+            path.setAttribute("d",
+                `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`);
+            path.setAttribute("class", "heap-arrow");
+            path.setAttribute("marker-end", "url(#arrowhead)");
+            svg.appendChild(path);
+        }
+
+        svg.setAttribute("width",  Math.max(totalW, 300));
         svg.setAttribute("height", maxY + PAD_Y);
     }
+
 
     /**
      * Parses heap objects from variables.
@@ -397,6 +418,117 @@ const Visualizer = (() => {
             .replace(/</g, "&lt;")
             .replace(/>/g, "&gt;")
             .replace(/"/g, "&quot;");
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  Syntax highlighting                                                 */
+    /* ------------------------------------------------------------------ */
+    const JAVA_KW = new Set([
+        "abstract","assert","boolean","break","byte","case","catch","char",
+        "class","const","continue","default","do","double","else","enum",
+        "extends","final","finally","float","for","goto","if","implements",
+        "import","instanceof","int","interface","long","native","new","null",
+        "package","private","protected","public","return","short","static",
+        "strictfp","super","switch","synchronized","this","throw","throws",
+        "transient","true","false","try","var","void","volatile","while",
+    ]);
+    const PRIM_TYPES = new Set([
+        "boolean","byte","char","double","float","int","long","short","void","var",
+    ]);
+
+    /**
+     * Tokenizes one line of Java source into an HTML string with `.syn-*` spans.
+     * Handles: line comments, string/char literals, numbers, keywords,
+     * primitive types, class names, method calls, and annotations.
+     */
+    function tokenizeJavaLine(line) {
+        let out   = "";
+        let i     = 0;
+        const n   = line.length;
+
+        function emit(cls, raw) {
+            out += cls ? `<span class="${cls}">${escHtml(raw)}</span>` : escHtml(raw);
+        }
+
+        while (i < n) {
+            // Line comment
+            if (line[i] === "/" && line[i + 1] === "/") {
+                emit("syn-cmt", line.slice(i));
+                break;
+            }
+            // String literal
+            if (line[i] === '"') {
+                let j = i + 1;
+                while (j < n && !(line[j] === '"' && line[j - 1] !== "\\")) { j++; }
+                emit("syn-str", line.slice(i, j + 1));
+                i = j + 1;
+                continue;
+            }
+            // Char literal
+            if (line[i] === "'") {
+                let j = i + 1;
+                while (j < n && !(line[j] === "'" && line[j - 1] !== "\\")) { j++; }
+                emit("syn-str", line.slice(i, j + 1));
+                i = j + 1;
+                continue;
+            }
+            // Number
+            if (/\d/.test(line[i]) || (line[i] === "-" && /\d/.test(line[i + 1] || ""))) {
+                let j = i + 1;
+                while (j < n && /[\d.xXbBa-fA-FLlUu_]/.test(line[j])) { j++; }
+                emit("syn-num", line.slice(i, j));
+                i = j;
+                continue;
+            }
+            // Annotation
+            if (line[i] === "@") {
+                let j = i + 1;
+                while (j < n && /\w/.test(line[j])) { j++; }
+                emit("syn-ann", line.slice(i, j));
+                i = j;
+                continue;
+            }
+            // Identifier or keyword
+            if (/[a-zA-Z_$]/.test(line[i])) {
+                let j = i + 1;
+                while (j < n && /[\w$]/.test(line[j])) { j++; }
+                const word = line.slice(i, j);
+                const after = line[j] || "";
+                if (JAVA_KW.has(word) && PRIM_TYPES.has(word)) {
+                    emit("syn-type", word);
+                } else if (JAVA_KW.has(word)) {
+                    emit("syn-kw", word);
+                } else if (/[A-Z]/.test(word[0])) {
+                    emit("syn-class", word);
+                } else if (after === "(") {
+                    emit("syn-method", word);
+                } else {
+                    emit(null, word);
+                }
+                i = j;
+                continue;
+            }
+            // Everything else: output as-is
+            emit(null, line[i]);
+            i++;
+        }
+        return out;
+    }
+
+    /**
+     * Re-renders the `#editor-highlight` pre-overlay with syntax-highlighted
+     * lines, line numbers, and a highlight on `activeLine` (1-based).
+     */
+    function renderHighlightPre(source, activeLine) {
+        if (!editorHighlightEl) { return; }
+        const lines = source.split("\n");
+        const html = lines.map((line, idx) => {
+            const num   = idx + 1;
+            const cls   = (num === activeLine) ? "code-line hl-active" : "code-line";
+            const lineH = tokenizeJavaLine(line) || "&nbsp;";
+            return `<div class="${cls}"><span class="line-num">${num}</span>${lineH}</div>`;
+        }).join("");
+        editorHighlightEl.innerHTML = html;
     }
 
     /* ------------------------------------------------------------------ */

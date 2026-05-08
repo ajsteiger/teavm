@@ -185,7 +185,7 @@ body {
     height: 100%;
     font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
     font-size: 13px;
-    padding: 8px;
+    padding: 8px 8px 8px 52px;  /* left padding makes room for line numbers */
     border: none;
     outline: none;
     resize: none;
@@ -194,26 +194,71 @@ body {
     white-space: pre;
     overflow-wrap: normal;
     overflow: auto;
-    background: #fff;
-    color: #1a1a1a;
+    background: transparent;
+    color: transparent;
     caret-color: #1a1a1a;
+    position: relative;
+    z-index: 1;
 }
 
-/* Highlighted line overlay */
-#editor-overlay {
+/* Pre overlay: renders syntax-highlighted lines + active line background */
+#editor-highlight {
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
+    margin: 0;
+    padding: 8px;
+    font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.55;
+    tab-size: 4;
+    white-space: pre;
+    overflow: scroll;
+    scrollbar-width: none;       /* Firefox */
     pointer-events: none;
-    overflow: hidden;
+    z-index: 0;
+    background: #fff;
+    color: #1a1a1a;
+    border: none;
+    border-radius: 0;
+    word-wrap: normal;
+}
+#editor-highlight::-webkit-scrollbar { display: none; }
+
+.code-line {
+    display: block;
+    padding-right: 12px;
 }
 
-.line-highlight {
-    position: absolute;
-    left: 0; right: 0;
+.code-line.hl-active {
     background: rgba(255, 220, 0, 0.35);
     border-left: 3px solid #f0b800;
-    pointer-events: none;
+    margin-left: -3px;
 }
+
+.line-num {
+    display: inline-block;
+    width: 36px;
+    margin-right: 8px;
+    text-align: right;
+    padding-right: 4px;
+    border-right: 1px solid #e8ecf0;
+    color: #aab;
+    user-select: none;
+    font-size: 11px;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Syntax highlighting token colours (IntelliJ light theme inspired)  */
+/* ------------------------------------------------------------------ */
+.syn-kw     { color: #0033b3; font-weight: 600; }    /* keywords   */
+.syn-type   { color: #0033b3; }                       /* primitives */
+.syn-class  { color: #1a5f8a; }                       /* class names */
+.syn-method { color: #7b36a8; }                       /* method calls */
+.syn-str    { color: #067d17; }                       /* strings / chars */
+.syn-num    { color: #1750eb; }                       /* numbers */
+.syn-cmt    { color: #8c8c8c; font-style: italic; }  /* comments */
+.syn-ann    { color: #808000; }                       /* annotations */
+
 
 /* ------------------------------------------------------------------ */
 /*  Panel 2 – frames & locals                                           */
@@ -347,6 +392,13 @@ body {
     font-size: 10px;
     fill: #1a6622;
     font-family: "Fira Code", Consolas, monospace;
+}
+
+.heap-field-ptr {
+    font-size: 10px;
+    fill: #8b4513;
+    font-family: "Fira Code", Consolas, monospace;
+    font-style: italic;
 }
 
 .heap-arrow {

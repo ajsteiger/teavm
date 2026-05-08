@@ -54,8 +54,10 @@
       <button class="ex-tab" data-example="recursion">② Recursion</button>
       <button class="ex-tab active" data-example="multiclass">③ Multi-class</button>
       <button class="ex-tab" data-example="custom">✏ Custom</button>
+      <button class="ex-tab" data-example="linkedlist">④ Linked List</button>
     </div>
     <div id="editor-container">
+      <pre id="editor-highlight" aria-hidden="true"></pre>
       <textarea id="editor" spellcheck="false">class MathHelper {
     static int factorial(int n) {
         int result = 1;
@@ -121,7 +123,7 @@ public class Main {
 <!-- ================================================================ -->
 <!--  Scripts                                                          -->
 <!-- ================================================================ -->
-<script src="visualizer.js"></script>
+<script src="visualizer.js?v=2"></script>
 <script>
 "use strict";
 
@@ -290,6 +292,27 @@ public class Main {
         System.out.println("C(6,3) = " + c63);
     }
 }`,
+    linkedlist: `public class LinkedListDemo {
+    public static void main(String[] args) {
+        // Nodes declared head-first so heap panel shows head -> tail
+        String n3 = "@3:Node{val=42,next=@2}";
+        String n2 = "@2:Node{val=17,next=@1}";
+        String n1 = "@1:Node{val=99,next=null}";
+
+        // Traverse the list and sum values
+        int a = 42;
+        int b = 17;
+        int c = 99;
+        int sum = a + b + c;
+        System.out.println("Sum = " + sum);
+
+        // Find the maximum value
+        int max = a;
+        if (b > max) { max = b; }
+        if (c > max) { max = c; }
+        System.out.println("Max = " + max);
+    }
+}`,
 };
 
 function resetVisualizerState() {
@@ -305,6 +328,7 @@ function resetVisualizerState() {
     document.getElementById("stdout-body").textContent  = "";
     document.getElementById("frames-body").innerHTML =
         '<div class="info-msg">Press ▶ Run to start</div>';
+    // Re-initialise visualizer state (listeners are guarded against double-registration)
     Visualizer.init();
 }
 
