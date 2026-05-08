@@ -122,6 +122,51 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Example tab strip (inside editor panel)                            */
+/* ------------------------------------------------------------------ */
+#example-tabs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 8px;
+    background: #f0f4f8;
+    border-bottom: 1px solid #d0d7de;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.ex-tabs-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #7a8a9a;
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
+.ex-tab {
+    padding: 3px 11px;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid #c4cdd6;
+    border-radius: 4px;
+    background: #fff;
+    color: #3a5a7a;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+    white-space: nowrap;
+}
+
+.ex-tab:hover { background: #e2eaf4; border-color: #a0b4c8; }
+
+.ex-tab.active {
+    background: #1e3a5f;
+    color: #fff;
+    border-color: #1e3a5f;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Panel 1 – editor                                                    */
 /* ------------------------------------------------------------------ */
 #editor-panel {

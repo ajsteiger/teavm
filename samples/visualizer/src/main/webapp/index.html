@@ -48,6 +48,13 @@
   <!-- Panel 1 – code editor -->
   <div class="panel" id="editor-panel">
     <div class="panel-header">Java Source</div>
+    <div id="example-tabs">
+      <span class="ex-tabs-label">Examples:</span>
+      <button class="ex-tab" data-example="loop">① Loop &amp; Vars</button>
+      <button class="ex-tab" data-example="recursion">② Recursion</button>
+      <button class="ex-tab active" data-example="multiclass">③ Multi-class</button>
+      <button class="ex-tab" data-example="custom">✏ Custom</button>
+    </div>
     <div id="editor-container">
       <textarea id="editor" spellcheck="false">class MathHelper {
     static int factorial(int n) {
@@ -227,6 +234,98 @@ function detectMainClass(source) {
     const m = /\bpublic\s+class\s+(\w+)/.exec(source);
     return m ? m[1] : null;
 }
+
+/* ------------------------------------------------------------------ */
+/*  Example presets & tab switching                                    */
+/* ------------------------------------------------------------------ */
+const EXAMPLES = {
+    loop: `public class HelloLoop {
+    public static void main(String[] args) {
+        int sum = 0;
+        int i = 1;
+        while (i <= 5) {
+            sum = sum + i;
+            i = i + 1;
+        }
+        System.out.println("Sum 1..5 = " + sum);
+    }
+}`,
+    recursion: `public class Fibonacci {
+    public static int fib(int n) {
+        if (n <= 1) { return n; }
+        int a = fib(n - 1);
+        int b = fib(n - 2);
+        return a + b;
+    }
+    public static void main(String[] args) {
+        for (int i = 0; i <= 6; i++) {
+            System.out.println("fib(" + i + ") = " + fib(i));
+        }
+    }
+}`,
+    multiclass: `class MathHelper {
+    static int factorial(int n) {
+        int result = 1;
+        int i = 2;
+        while (i <= n) {
+            result = result * i;
+            i = i + 1;
+        }
+        return result;
+    }
+    static int choose(int n, int k) {
+        int nFact = factorial(n);
+        int kFact = factorial(k);
+        int nkFact = factorial(n - k);
+        return nFact / (kFact * nkFact);
+    }
+}
+public class Main {
+    public static void main(String[] args) {
+        int c42 = MathHelper.choose(4, 2);
+        int c53 = MathHelper.choose(5, 3);
+        int c63 = MathHelper.choose(6, 3);
+        System.out.println("C(4,2) = " + c42);
+        System.out.println("C(5,3) = " + c53);
+        System.out.println("C(6,3) = " + c63);
+    }
+}`,
+};
+
+function resetVisualizerState() {
+    if (worker) { worker.terminate(); worker = null; }
+    setProgress(false);
+    setStatus("");
+    clearDiagnostics();
+    document.getElementById("step-slider").disabled = true;
+    document.getElementById("prev-btn").disabled    = true;
+    document.getElementById("next-btn").disabled    = true;
+    document.getElementById("step-slider").value    = 0;
+    document.getElementById("step-counter").textContent = "–";
+    document.getElementById("stdout-body").textContent  = "";
+    document.getElementById("frames-body").innerHTML =
+        '<div class="info-msg">Press ▶ Run to start</div>';
+    Visualizer.init();
+}
+
+document.getElementById("example-tabs").addEventListener("click", (e) => {
+    const btn = e.target.closest(".ex-tab");
+    if (!btn) return;
+    document.querySelectorAll(".ex-tab").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    const key = btn.dataset.example;
+    if (key !== "custom") {
+        document.getElementById("editor").value = EXAMPLES[key];
+        resetVisualizerState();
+    }
+});
+
+// Switch to Custom tab when user edits the source
+document.getElementById("editor").addEventListener("input", () => {
+    const tabs = document.querySelectorAll(".ex-tab");
+    tabs.forEach(b => b.classList.remove("active"));
+    document.querySelector('.ex-tab[data-example="custom"]').classList.add("active");
+});
 
 /* ------------------------------------------------------------------ */
 /*  Initialise visualizer                                               */
