@@ -121,6 +121,26 @@ public class Main {
 </div><!-- #workspace -->
 
 <!-- ================================================================ -->
+<!--  Debug panel (collapsible, below workspace)                       -->
+<!-- ================================================================ -->
+<details id="debug-section">
+  <summary id="debug-summary">⚙ Debug: Instrumented Source</summary>
+  <div id="debug-tabs">
+    <button class="debug-tab active" data-target="debug-instrumented">User code + injected calls</button>
+    <button class="debug-tab" data-target="debug-steprecorder">StepRecorder.java</button>
+  </div>
+  <pre id="debug-instrumented" class="debug-pre"></pre>
+  <pre id="debug-steprecorder" class="debug-pre" style="display:none"></pre>
+  <p class="debug-note">
+    This is the <strong>current fallback path</strong>: source-level text instrumentation
+    in <code>worker.js</code>. The preferred approach is IR-level instrumentation via
+    <code>compiler.generateVisualizer()</code> inside TeaVM's
+    <code>StepInstrumentationTransformer</code>, which would handle all Java
+    language features and capture real heap state without source rewriting.
+  </p>
+</details>
+
+<!-- ================================================================ -->
 <!--  Scripts                                                          -->
 <!-- ================================================================ -->
 <script src="visualizer.js?v=2"></script>
@@ -156,6 +176,10 @@ function handleWorkerMessage(event) {
 
         case "diagnostic":
             showDiagnostic(msg);
+            break;
+
+        case "instrumented-source":
+            showInstrumentedSource(msg.instrumentedSource, msg.stepRecorderSource);
             break;
 
         case "trace-complete":
@@ -349,6 +373,26 @@ document.getElementById("editor").addEventListener("input", () => {
     const tabs = document.querySelectorAll(".ex-tab");
     tabs.forEach(b => b.classList.remove("active"));
     document.querySelector('.ex-tab[data-example="custom"]').classList.add("active");
+});
+
+/* ------------------------------------------------------------------ */
+/*  Debug panel                                                        */
+/* ------------------------------------------------------------------ */
+function showInstrumentedSource(userSrc, stepRecSrc) {
+    document.getElementById("debug-instrumented").textContent  = userSrc || "";
+    document.getElementById("debug-steprecorder").textContent  = stepRecSrc || "";
+    document.getElementById("debug-section").open = false; // keep collapsed until user opens
+}
+
+document.getElementById("debug-tabs").addEventListener("click", (e) => {
+    const btn = e.target.closest(".debug-tab");
+    if (!btn) return;
+    document.querySelectorAll(".debug-tab").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    const targetId = btn.dataset.target;
+    document.querySelectorAll(".debug-pre").forEach(p => {
+        p.style.display = p.id === targetId ? "" : "none";
+    });
 });
 
 /* ------------------------------------------------------------------ */

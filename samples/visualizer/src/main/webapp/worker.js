@@ -173,6 +173,13 @@ async function runCompilation(javaSource, mainClass) {
     postStatus("Instrumenting source…");
     const { instrumentedSource, stepRecorderSource } = instrumentSource(javaSource, detectedClass);
 
+    // ---- 2b. Send instrumented source back to the UI for the debug panel
+    self.postMessage({
+        type: "instrumented-source",
+        instrumentedSource,
+        stepRecorderSource,
+    });
+
     // ---- 3. Feed sources into the compiler --------------------------
     postStatus("Compiling…");
     compiler.clearSourceFiles();
