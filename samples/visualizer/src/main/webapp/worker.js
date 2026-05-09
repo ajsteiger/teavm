@@ -255,14 +255,73 @@ async function runInstrumented(wasmBytes) {
 
     const VIZ_PREFIX = "\u0000VIZ:";
 
+    // Declare line buffers in the outer function scope so they can be
+    // flushed after main() returns (handles output not ending in '\n').
+    let stdoutLine = "";
+    let stderrLine = "";
+
+    function processStderrLine(line) {
+        if (line.startsWith(VIZ_PREFIX)) {
+            const raw = line.slice(VIZ_PREFIX.length);
+            // Protocol: "step:cls:meth:line:...|name=val|name=val"
+            // Split frames section (before first |) from vars section
+            const pipeIdx   = raw.indexOf("|");
+            const framesRaw = pipeIdx >= 0 ? raw.slice(0, pipeIdx) : raw;
+            const varsRaw   = pipeIdx >= 0 ? raw.slice(pipeIdx + 1) : "";
+            const parts     = framesRaw.split(":");
+            if (parts[0] === "step" && parts.length >= 4) {
+                if (!truncated) {
+                    const frames = [];
+                    for (let fi = 1; fi + 2 < parts.length; fi += 3) {
+                        frames.push({
+                            className: parts[fi],
+                            method:    parts[fi + 1],
+                            line:      parseInt(parts[fi + 2], 10),
+                        });
+                    }
+                    const vars = varsRaw
+                        ? varsRaw.split("|").map(p => {
+                            const eq = p.indexOf("=");
+                            return eq >= 0
+                                ? { name: p.slice(0, eq), value: p.slice(eq + 1) }
+                                : null;
+                        }).filter(Boolean)
+                        : [];
+                    const top = frames[frames.length - 1] || {};
+                    trace.push({
+                        line:      top.line || 0,
+                        className: top.className || "?",
+                        method:    top.method || "?",
+                        frames,
+                        vars,
+                        stdout,
+                    });
+                    if (trace.length >= MAX_STEPS) truncated = true;
+                }
+            } else if (parts[0] === "truncated") {
+                truncated = true;
+            } else if (parts[0] === "var" && trace.length > 0) {
+                // IR path: "\0VIZ:var:name=value" — append to current step
+                const nvStr = raw.slice(4); // skip "var:"
+                const eqIdx = nvStr.indexOf("=");
+                if (eqIdx >= 0) {
+                    trace[trace.length - 1].vars.push({
+                        name: nvStr.slice(0, eqIdx),
+                        value: nvStr.slice(eqIdx + 1),
+                    });
+                }
+            }
+        } else {
+            stdout += line + "\n";
+        }
+    }
+
     try {
         // The same load() from compiler.wasm-runtime.js works for user-generated wasm.
         // Pass bytes directly (Int8Array accepted alongside URL strings).
         const userTeavm = await runtimeModule.load(wasmBytes, {
             installImports(o) {
                 // Wire up stdout/stderr character-by-character handlers
-                let stdoutLine = "";
-                let stderrLine = "";
                 if (o.teavmConsole) {
                     o.teavmConsole.putcharStdout = (ch) => {
                         if (ch === 0x0A) {
@@ -276,59 +335,7 @@ async function runInstrumented(wasmBytes) {
                         if (ch === 0x0A) {
                             const line = stderrLine;
                             stderrLine = "";
-                            if (line.startsWith(VIZ_PREFIX)) {
-                                const raw = line.slice(VIZ_PREFIX.length);
-                                // Protocol: "step:cls:meth:line:...|name=val|name=val"
-                                // Split frames section (before first |) from vars section
-                                const pipeIdx   = raw.indexOf("|");
-                                const framesRaw = pipeIdx >= 0 ? raw.slice(0, pipeIdx) : raw;
-                                const varsRaw   = pipeIdx >= 0 ? raw.slice(pipeIdx + 1) : "";
-                                const parts     = framesRaw.split(":");
-                                if (parts[0] === "step" && parts.length >= 4) {
-                                    if (!truncated) {
-                                        const frames = [];
-                                        for (let fi = 1; fi + 2 < parts.length; fi += 3) {
-                                            frames.push({
-                                                className: parts[fi],
-                                                method:    parts[fi + 1],
-                                                line:      parseInt(parts[fi + 2], 10),
-                                            });
-                                        }
-                                        const vars = varsRaw
-                                            ? varsRaw.split("|").map(p => {
-                                                const eq = p.indexOf("=");
-                                                return eq >= 0
-                                                    ? { name: p.slice(0, eq), value: p.slice(eq + 1) }
-                                                    : null;
-                                            }).filter(Boolean)
-                                            : [];
-                                        const top = frames[frames.length - 1] || {};
-                                        trace.push({
-                                            line:      top.line || 0,
-                                            className: top.className || "?",
-                                            method:    top.method || "?",
-                                            frames,
-                                            vars,
-                                            stdout,
-                                        });
-                                        if (trace.length >= MAX_STEPS) truncated = true;
-                                    }
-                                } else if (parts[0] === "truncated") {
-                                    truncated = true;
-                                } else if (parts[0] === "var" && trace.length > 0) {
-                                    // IR path: "\0VIZ:var:name=value" — append to current step
-                                    const nvStr = raw.slice(4); // skip "var:"
-                                    const eqIdx = nvStr.indexOf("=");
-                                    if (eqIdx >= 0) {
-                                        trace[trace.length - 1].vars.push({
-                                            name: nvStr.slice(0, eqIdx),
-                                            value: nvStr.slice(eqIdx + 1),
-                                        });
-                                    }
-                                }
-                            } else {
-                                stdout += line + "\n";
-                            }
+                            processStderrLine(line);
                         } else {
                             stderrLine += String.fromCharCode(ch);
                         }
@@ -343,6 +350,16 @@ async function runInstrumented(wasmBytes) {
         stdout += "\n[Exception: " + String(e) + "]\n";
     }
 
+    // Flush any partial line that was not terminated by '\n'.
+    if (stdoutLine.length > 0) {
+        stdout += stdoutLine;
+        stdoutLine = "";
+    }
+    if (stderrLine.length > 0) {
+        processStderrLine(stderrLine);
+        stderrLine = "";
+    }
+
     return { trace, truncated, stdout };
 }
 
@@ -350,10 +367,17 @@ async function runInstrumented(wasmBytes) {
 /*  Utilities                                                           */
 /* ------------------------------------------------------------------ */
 
-/** Attempt to detect the public class name from source text. */
+/**
+ * Attempt to detect the public class name from source text.
+ *
+ * Handles optional class modifiers (abstract, final, strictfp) and returns
+ * a fully-qualified name when a package declaration is present.
+ */
 function detectClassName(source) {
-    const m = /\bpublic\s+class\s+(\w+)/.exec(source);
-    return m ? m[1] : null;
+    const pkgMatch = /^\s*package\s+([\w.]+)\s*;/m.exec(source);
+    const pkg = pkgMatch ? pkgMatch[1] + "." : "";
+    const m = /\bpublic\s+(?:(?:abstract|final|strictfp)\s+)*class\s+(\w+)/.exec(source);
+    return m ? pkg + m[1] : null;
 }
 
 function postStatus(message) {

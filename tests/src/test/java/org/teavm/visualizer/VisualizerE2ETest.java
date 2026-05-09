@@ -97,6 +97,7 @@ public class VisualizerE2ETest {
     public static void tearDown() {
         rhinoRootScope = null;
         rhinoContext = null;
+        Context.exit();
     }
 
     // -----------------------------------------------------------------------

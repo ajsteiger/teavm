@@ -17,6 +17,7 @@ package org.teavm.visualizer;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -70,6 +71,9 @@ public class IrDemoGenerator {
 
     @Test
     public void generateIrDemo() throws IOException {
+        assumeTrue("Set -Dteavm.visualizer.generateDemos=true to run this generator",
+                Boolean.getBoolean("teavm.visualizer.generateDemos"));
+
         Path repoRoot = findRepoRoot();
 
         compile(RecursiveFactorial.class.getName(), "ir-recursive.js",   repoRoot);

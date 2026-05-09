@@ -233,8 +233,10 @@ function showDiagnostic(d) {
 }
 
 function detectMainClass(source) {
-    const m = /\bpublic\s+class\s+(\w+)/.exec(source);
-    return m ? m[1] : null;
+    const pkgMatch = /^\s*package\s+([\w.]+)\s*;/m.exec(source);
+    const pkg = pkgMatch ? pkgMatch[1] + "." : "";
+    const m = /\bpublic\s+(?:(?:abstract|final|strictfp)\s+)*class\s+(\w+)/.exec(source);
+    return m ? pkg + m[1] : null;
 }
 
 /* ------------------------------------------------------------------ */

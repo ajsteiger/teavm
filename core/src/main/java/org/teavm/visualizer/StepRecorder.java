@@ -129,6 +129,11 @@ public final class StepRecorder {
      * object's declared instance fields.  Nested object field values are encoded as
      * {@code "@id"} (no recursive expansion, avoiding cycles).</p>
      *
+     * <p>Special characters {@code ,}, {@code {}, {@code }} and newlines in field
+     * names or values are percent-encoded so the VIZ protocol line remains
+     * unambiguous.  Synthetic (compiler-generated) fields such as {@code this$0}
+     * are skipped.</p>
+     *
      * @param name  Java variable name (from the local-variable table)
      * @param value current value (may be {@code null})
      */
@@ -154,6 +159,9 @@ public final class StepRecorder {
             if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
                 continue;
             }
+            if (f.isSynthetic()) {
+                continue;
+            }
             f.setAccessible(true);
             Object fval;
             try {
@@ -165,18 +173,56 @@ public final class StepRecorder {
                 sb.append(",");
             }
             first = false;
-            sb.append(f.getName()).append("=");
+            sb.append(escapeVizToken(f.getName())).append("=");
             if (fval == null) {
                 sb.append("null");
             } else if (fval instanceof String || fval instanceof Number
                     || fval instanceof Boolean || fval instanceof Character) {
-                sb.append(fval);
+                sb.append(escapeVizToken(fval.toString()));
             } else {
                 sb.append("@").append(Integer.toUnsignedString(System.identityHashCode(fval)));
             }
         }
         sb.append("}");
         jsCaptureVar(name, sb.toString());
+    }
+
+    /**
+     * Percent-encodes characters that are structurally significant in the VIZ
+     * object-literal format: {@code ,} {@code {} {@code }} and newlines.
+     * This keeps each {@code captureRef} value on exactly one line and
+     * unambiguously parseable by the JS heap parser.
+     */
+    private static String escapeVizToken(String s) {
+        if (s == null) {
+            return "null";
+        }
+        int len = s.length();
+        StringBuilder out = null; // lazy allocation
+        for (int i = 0; i < len; i++) {
+            char c = s.charAt(i);
+            String replacement = null;
+            if (c == ',') {
+                replacement = "%2C";
+            } else if (c == '{') {
+                replacement = "%7B";
+            } else if (c == '}') {
+                replacement = "%7D";
+            } else if (c == '\n') {
+                replacement = "%0A";
+            } else if (c == '\r') {
+                replacement = "%0D";
+            }
+            if (replacement != null) {
+                if (out == null) {
+                    out = new StringBuilder(s.substring(0, i));
+                }
+                out.append(replacement);
+            } else if (out != null) {
+                out.append(c);
+            }
+        }
+        return out != null ? out.toString() : s;
     }
 
     /**
