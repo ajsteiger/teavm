@@ -214,11 +214,8 @@ const Visualizer = (() => {
     /**
      * Parses heap objects from the vars at this step.
      * We look for variables whose value starts with "@" (object reference)
-     * and collect them as named heap objects.  For this source-level
-     * instrumentation demo, heap objects are synthesized from variable values
-     * that follow the convention "@ID:ClassName{field=value,...}".
-     *
-     * Full heap object tracking requires the IR-level StepInstrumentationTransformer.
+     * and collect them as named heap objects.  IR-level visualizer instrumentation
+     * emits object references using the convention "@ID:ClassName{field=value,...}".
      */
     function renderHeap(step) {
         const ns  = "http://www.w3.org/2000/svg";

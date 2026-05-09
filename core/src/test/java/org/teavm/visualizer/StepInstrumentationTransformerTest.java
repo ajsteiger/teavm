@@ -32,6 +32,7 @@ import org.teavm.model.MethodHolder;
 import org.teavm.model.Program;
 import org.teavm.model.TextLocation;
 import org.teavm.model.ValueType;
+import org.teavm.model.Variable;
 import org.teavm.model.instructions.EmptyInstruction;
 import org.teavm.model.instructions.ExitInstruction;
 import org.teavm.model.instructions.IntegerConstantInstruction;
@@ -395,8 +396,171 @@ public class StepInstrumentationTransformerTest {
     }
 
     // ------------------------------------------------------------------
-    //  Helpers
+    //  captureVar() insertion for named parameters
     // ------------------------------------------------------------------
+
+    private static final String CAPTURE_VAR_METHOD = "captureVar";
+
+    @Test
+    public void namedIntParam_captureVarCalledAfterStep() {
+        ClassHolder cls = instrumentWithNamedParam("Main", "compute",
+                "n", ValueType.INTEGER, true, makeSimpleProgram(5));
+        long captures = countRecorderInvokeNamed(
+                programOf(cls, "compute", ValueType.INTEGER), CAPTURE_VAR_METHOD);
+        assertEquals(1, captures);
+    }
+
+    @Test
+    public void namedParam_captureVarFollowsStep() {
+        ClassHolder cls = instrumentWithNamedParam("Main", "compute",
+                "n", ValueType.INTEGER, true, makeSimpleProgram(5));
+        Program program = programOf(cls, "compute", ValueType.INTEGER);
+        List<String> names = collectInvokeTargetNames(program);
+        int stepIdx = names.indexOf(STEP_METHOD);
+        int captureIdx = names.indexOf(CAPTURE_VAR_METHOD);
+        assertTrue("step must precede captureVar", stepIdx >= 0 && captureIdx > stepIdx);
+    }
+
+    @Test
+    public void namedParam_captureVarUsesCorrectName() {
+        ClassHolder cls = instrumentWithNamedParam("Main", "compute",
+                "myParam", ValueType.INTEGER, true, makeSimpleProgram(5));
+        Program program = programOf(cls, "compute", ValueType.INTEGER);
+        InvokeInstruction captureInvoke = firstRecorderInvokeNamed(program, CAPTURE_VAR_METHOD);
+        assertNotNull(captureInvoke);
+        assertEquals(2, captureInvoke.getArguments().size());
+        String capturedName = stringConstBefore(captureInvoke, 1);
+        assertEquals("myParam", capturedName);
+    }
+
+    @Test
+    public void twoDistinctLines_captureVarCalledOncePerLine() {
+        Program program = makeSimpleProgramWithNamedVar(new int[]{5, 7}, "val", 1);
+        ClassHolder cls = instrumentWithNamedParam("Main", "run",
+                "val", ValueType.INTEGER, true, program);
+        long captures = countRecorderInvokeNamed(
+                programOf(cls, "run", ValueType.INTEGER), CAPTURE_VAR_METHOD);
+        assertEquals(2, captures);
+    }
+
+    @Test
+    public void paramWithNoDebugName_noCaptureVarEmitted() {
+        // Variable has register=1 (matches the int param SSA index) but no debugName
+        Program program = new Program();
+        Variable unnamedVar = program.createVariable();
+        unnamedVar.setRegister(1);
+        // no setDebugName() call → debugName remains null
+        BasicBlock block = program.createBasicBlock();
+        EmptyInstruction e = new EmptyInstruction();
+        e.setLocation(new TextLocation("Main.java", 10));
+        block.add(e);
+        block.add(new ExitInstruction());
+
+        StepInstrumentationTransformer transformer = new StepInstrumentationTransformer("Main");
+        ClassHolder cls = makeClass("Main");
+        MethodHolder method = new MethodHolder("run", ValueType.INTEGER, ValueType.VOID);
+        method.getModifiers().add(ElementModifier.STATIC);
+        method.setProgram(program);
+        cls.addMethod(method);
+        transformer.transformClass(cls, null);
+
+        long captures = countRecorderInvokeNamed(
+                programOf(cls, "run", ValueType.INTEGER), CAPTURE_VAR_METHOD);
+        assertEquals(0, captures);
+    }
+
+    @Test
+    public void nonParamVariable_noCaptureVarEmitted() {
+        // Variable at register=-1 (no slot mapping) should not be captured
+        Program program = new Program();
+        Variable unslottedVar = program.createVariable();
+        unslottedVar.setRegister(-1);
+        unslottedVar.setDebugName("tmp");
+        BasicBlock block = program.createBasicBlock();
+        EmptyInstruction e = new EmptyInstruction();
+        e.setLocation(new TextLocation("Main.java", 3));
+        block.add(e);
+        block.add(new ExitInstruction());
+
+        StepInstrumentationTransformer transformer = new StepInstrumentationTransformer("Foo");
+        ClassHolder cls = makeClass("Foo");
+        MethodHolder method = new MethodHolder("go", ValueType.INTEGER, ValueType.VOID);
+        method.getModifiers().add(ElementModifier.STATIC);
+        method.setProgram(program);
+        cls.addMethod(method);
+        transformer.transformClass(cls, null);
+
+        long captures = countRecorderInvokeNamed(
+                programOf(cls, "go", ValueType.INTEGER), CAPTURE_VAR_METHOD);
+        assertEquals(0, captures);
+    }
+
+    // ------------------------------------------------------------------
+    //  Helpers (extended)
+    // ------------------------------------------------------------------
+
+    /**
+     * Instruments a class whose named method has one parameter of the given type.
+     * The parameter variable is registered with the supplied {@code paramName} so the
+     * transformer can find it by debug name.
+     */
+    private ClassHolder instrumentWithNamedParam(String className, String methodName,
+            String paramName, ValueType paramType, boolean isStatic, Program program) {
+        // Register a variable for the parameter in the program (if not already present)
+        // TeaVM SSA convention: both static and non-static methods have their first
+        // declared parameter at variable index / register 1 (slot 0 is always reserved
+        // — for 'this' in instance methods, or as a stack-frame placeholder for statics).
+        int slot = 1;
+        boolean found = false;
+        for (int vi = 0; vi < program.variableCount(); vi++) {
+            if (program.variableAt(vi).getRegister() == slot) {
+                program.variableAt(vi).setDebugName(paramName);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            Variable v = program.createVariable();
+            v.setRegister(slot);
+            v.setDebugName(paramName);
+        }
+
+        StepInstrumentationTransformer transformer = new StepInstrumentationTransformer(className);
+        ClassHolder cls = makeClass(className);
+        MethodHolder method = new MethodHolder(methodName, paramType, ValueType.VOID);
+        if (isStatic) {
+            method.getModifiers().add(ElementModifier.STATIC);
+        }
+        method.setProgram(program);
+        cls.addMethod(method);
+        transformer.transformClass(cls, null);
+        return cls;
+    }
+
+    /** Returns the {@link Program} of a method that takes one parameter of {@code paramType}. */
+    private Program programOf(ClassHolder cls, String methodName, ValueType paramType) {
+        return cls.getMethod(new MethodDescriptor(methodName, paramType, ValueType.VOID)).getProgram();
+    }
+
+    /**
+     * Program with one variable at the given register/slot and one instruction per line entry.
+     */
+    private Program makeSimpleProgramWithNamedVar(int[] lines, String debugName, int register) {
+        Program program = new Program();
+        Variable v = program.createVariable();
+        v.setRegister(register);
+        v.setDebugName(debugName);
+        BasicBlock block = program.createBasicBlock();
+        for (int line : lines) {
+            EmptyInstruction e = new EmptyInstruction();
+            e.setLocation(new TextLocation("Main.java", line));
+            block.add(e);
+        }
+        block.add(new ExitInstruction());
+        return program;
+    }
+
+
 
     /** Instruments the named method in a freshly-created class. */
     private ClassHolder instrument(String className, String methodName, Program program) {

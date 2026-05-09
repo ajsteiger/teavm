@@ -1,0 +1,446 @@
+<!--
+    Copyright 2026 Alexey Andreev.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+         http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Java IR Visualizer — Demo</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    /* ---- IR-backend banner ---- */
+    #ir-banner {
+      background: #1a3a1a;
+      border-bottom: 2px solid #4caf50;
+      color: #a5d6a7;
+      font-size: 0.82rem;
+      padding: 6px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    #ir-banner strong { color: #81c784; }
+    #ir-banner code   { background: #0d2a0d; padding: 1px 5px; border-radius: 3px; }
+
+    /* ---- Example tabs ---- */
+    #example-tabs {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      background: #1e3a5f;
+      border-bottom: 1px solid #2c5282;
+      flex-shrink: 0;
+    }
+    .ex-tabs-label {
+      font-size: 11px;
+      color: #90aece;
+      margin-right: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .ex-tab {
+      padding: 4px 12px;
+      border: 1px solid #3a6ea8;
+      border-radius: 4px;
+      background: transparent;
+      color: #90caf9;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .ex-tab:hover  { background: #2c5282; color: #fff; }
+    .ex-tab.active { background: #3498db; color: #fff; border-color: #3498db; }
+    .ex-tab:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* keep editor font small for these longer fixtures */
+    #editor { font-size: 12px; }
+  </style>
+</head>
+<body>
+
+<!-- ================================================================ -->
+<!--  IR-backend banner                                                -->
+<!-- ================================================================ -->
+<div id="ir-banner">
+  <span>🔬</span>
+  <span><strong>IR-backend demo</strong> — trace produced by
+    <code>StepInstrumentationTransformer</code> operating directly on TeaVM IR,
+    not source-level text rewriting. Pre-compiled with
+    <code>IrDemoGenerator</code> — no server needed.
+  </span>
+</div>
+
+<!-- ================================================================ -->
+<!--  Toolbar                                                          -->
+<!-- ================================================================ -->
+<div id="toolbar">
+  <h1>☕ Java Visualizer</h1>
+
+  <button id="prev-btn" disabled>«</button>
+  <span   id="step-counter">–</span>
+  <button id="next-btn" disabled>»</button>
+
+  <input id="step-slider" type="range" min="0" max="0" value="0" disabled>
+
+  <span id="status-msg">Loading…</span>
+</div>
+
+<!-- ================================================================ -->
+<!--  Example tabs (above the workspace)                               -->
+<!-- ================================================================ -->
+<div id="example-tabs">
+  <span class="ex-tabs-label">Example:</span>
+  <button class="ex-tab active" data-example="loop">① Loop &amp; Vars</button>
+  <button class="ex-tab"        data-example="recursive">② Recursion</button>
+  <button class="ex-tab"        data-example="multimethod">③ Multi-method</button>
+  <button class="ex-tab"        data-example="linkedlist">④ Linked List</button>
+</div>
+
+<!-- ================================================================ -->
+<!--  Three-panel workspace                                            -->
+<!-- ================================================================ -->
+<div id="workspace">
+
+  <!-- Panel 1 – source (read-only, swapped per example) -->
+  <div class="panel" id="editor-panel">
+    <div class="panel-header" id="source-title">Java Source</div>
+    <div id="editor-container">
+      <pre id="editor-highlight" aria-hidden="true"></pre>
+      <textarea id="editor" spellcheck="false" readonly></textarea>
+      <div id="editor-overlay"></div>
+    </div>
+  </div>
+
+  <!-- Panel 2 – frames & locals -->
+  <div class="panel" id="frames-panel">
+    <div class="panel-header">Frames &amp; Locals</div>
+    <div id="frames-body">
+      <div class="info-msg">Loading…</div>
+    </div>
+  </div>
+
+  <!-- Panel 3 – heap -->
+  <div class="panel" id="heap-panel">
+    <div class="panel-header">Heap</div>
+    <div id="heap-svg-container">
+      <svg id="heap-svg" xmlns="http://www.w3.org/2000/svg" width="300" height="60">
+        <text x="20" y="36" font-size="12" fill="#999">Heap objects will appear here</text>
+      </svg>
+    </div>
+  </div>
+
+  <!-- Stdout panel -->
+  <div class="panel" id="stdout-panel">
+    <div class="panel-header">Output</div>
+    <pre id="stdout-body"></pre>
+  </div>
+
+</div><!-- #workspace -->
+
+<!-- ================================================================ -->
+<!--  Example data                                                     -->
+<!-- ================================================================ -->
+<script>
+"use strict";
+
+const EXAMPLES = {
+  loop: {
+    title: "LoopExample.java",
+    source: `public final class LoopExample {
+    public static int sumTo(int n) {
+        int sum = 0;
+        int i = 1;
+        while (i <= n) {
+            sum = sum + i;
+            i = i + 1;
+        }
+        return sum;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(sumTo(4));
+    }
+}`,
+    script: "ir-loop.js"
+  },
+
+  recursive: {
+    title: "RecursiveFactorial.java",
+    source: `public final class RecursiveFactorial {
+    public static int factorial(int n) {
+        if (n <= 1) {
+            return 1;
+        }
+        return n * factorial(n - 1);
+    }
+
+    public static void main(String[] args) {
+        System.out.println(factorial(4));
+    }
+}`,
+    script: "ir-recursive.js"
+  },
+
+  multimethod: {
+    title: "MultiMethodExample.java",
+    source: `public final class MultiMethodExample {
+    public static int factorial(int n) {
+        int result = 1;
+        int i = 2;
+        while (i <= n) {
+            result = result * i;
+            i = i + 1;
+        }
+        return result;
+    }
+
+    public static int choose(int n, int k) {
+        int nFact = factorial(n);
+        int kFact = factorial(k);
+        int nkFact = factorial(n - k);
+        return nFact / (kFact * nkFact);
+    }
+
+    public static void main(String[] args) {
+        System.out.println(choose(5, 2));
+    }
+}`  ,
+    script: "ir-multimethod.js"
+  },
+
+  linkedlist: {
+    title: "LinkedListFixture.java",
+    source: `public final class LinkedListFixture {
+    static final class Node {
+        int val;
+        Node next;
+        Node(int val, Node next) {
+            this.val = val;
+            this.next = next;
+        }
+    }
+
+    public static void main(String[] args) {
+        Node n1 = new Node(99, null);
+        Node n2 = new Node(17, n1);
+        Node n3 = new Node(42, n2);
+
+        int sum = n1.val + n2.val + n3.val;
+        int max = n1.val;
+        if (n2.val > max) {
+            max = n2.val;
+        }
+        if (n3.val > max) {
+            max = n3.val;
+        }
+
+        System.out.println("Sum = " + sum);
+        System.out.println("Max = " + max);
+    }
+}`,
+    script: "ir-linkedlist.js"
+  }
+};
+</script>
+
+<!-- ================================================================ -->
+<!--  Capture hooks — must be defined before any TeaVM script loads   -->
+<!-- ================================================================ -->
+<script>
+"use strict";
+
+/* Reset buffers before each example run */
+let _stderrBuf = "";
+let _vizLines  = [];
+let _stdout    = "";
+
+window.$rt_putStderrCustom = function(s) {
+    _stderrBuf += s;
+    let nl;
+    while ((nl = _stderrBuf.indexOf("\n")) !== -1) {
+        _vizLines.push(_stderrBuf.slice(0, nl));
+        _stderrBuf = _stderrBuf.slice(nl + 1);
+    }
+};
+
+window.$rt_putStdoutCustom = function(s) {
+    _stdout += s;
+};
+
+function resetCapture() {
+    _stderrBuf = "";
+    _vizLines  = [];
+    _stdout    = "";
+}
+</script>
+
+<script src="visualizer.js?v=2"></script>
+
+<!-- ================================================================ -->
+<!--  App logic                                                        -->
+<!-- ================================================================ -->
+<script>
+"use strict";
+
+/* ---- VIZ trace parser ---- */
+function parseVizTrace(lines, finalStdout) {
+    const steps = [];
+    let currentStep = null;
+
+    for (const line of lines) {
+        if (!line.startsWith("\u0000VIZ:")) continue;
+        const payload = line.slice(5);  // strip "\0VIZ:"
+
+        if (payload.startsWith("step:")) {
+            const parts  = payload.slice(5).split(":");
+            const frames = [];
+            for (let i = 0; i + 2 < parts.length; i += 3) {
+                const full = parts[i];
+                const shortName = full.slice(full.lastIndexOf(".") + 1);
+                frames.push({
+                    className: shortName,
+                    method:    parts[i + 1],
+                    line:      parseInt(parts[i + 2], 10)
+                });
+            }
+            const last = frames[frames.length - 1] || {};
+            currentStep = {
+                line:   last.line      || 0,
+                className: last.className || "",
+                method: last.method    || "",
+                frames,
+                vars:   [],
+                stdout: ""
+            };
+            steps.push(currentStep);
+
+        } else if (payload.startsWith("var:") && currentStep) {
+            const kv = payload.slice(4);
+            const eq = kv.indexOf("=");
+            if (eq !== -1) {
+                currentStep.vars.push({ name: kv.slice(0, eq), value: kv.slice(eq + 1) });
+            }
+        }
+    }
+
+    if (steps.length > 0) {
+        steps[steps.length - 1].stdout = finalStdout;
+    }
+    return steps;
+}
+
+/* ---- Dynamic script loader ---- */
+let _loadedScript = null;
+
+function loadExample(key) {
+    const ex = EXAMPLES[key];
+    if (!ex) return;
+
+    // Update tabs
+    document.querySelectorAll(".ex-tab").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.example === key);
+        btn.disabled = true;
+    });
+
+    // Update source panel — set value then fire "input" so visualizer.js re-renders highlight
+    document.getElementById("source-title").textContent = "Java Source — " + ex.title;
+    const editorEl = document.getElementById("editor");
+    editorEl.value = ex.source;
+    editorEl.dispatchEvent(new Event("input"));
+
+    // Reset visualizer UI
+    const statusEl = document.getElementById("status-msg");
+    statusEl.textContent = "Loading…";
+    document.getElementById("step-slider").disabled = true;
+    document.getElementById("prev-btn").disabled    = true;
+    document.getElementById("next-btn").disabled    = true;
+    document.getElementById("frames-body").innerHTML =
+        '<div class="info-msg">Loading…</div>';
+    document.getElementById("step-counter").textContent = "–";
+
+    // Remove previously loaded script so the new one can redefine globals
+    if (_loadedScript) {
+        _loadedScript.remove();
+        _loadedScript = null;
+        window.main = undefined;
+    }
+
+    resetCapture();
+
+    const s = document.createElement("script");
+    s.src = ex.script + "?ex=" + key;   // cache-bust per example
+    s.onload = () => runTrace(ex, statusEl);
+    s.onerror = () => {
+        statusEl.textContent = "Failed to load " + ex.script;
+        document.querySelectorAll(".ex-tab").forEach(b => b.disabled = false);
+    };
+    document.head.appendChild(s);
+    _loadedScript = s;
+}
+
+function runTrace(ex, statusEl) {
+    if (typeof window.main !== "function") {
+        statusEl.textContent = "Error: " + ex.script + " did not export window.main";
+        document.querySelectorAll(".ex-tab").forEach(b => b.disabled = false);
+        return;
+    }
+
+    statusEl.textContent = "Running…";
+
+    window.main([], function(err) {
+        document.querySelectorAll(".ex-tab").forEach(b => b.disabled = false);
+
+        if (err) {
+            statusEl.textContent = "Runtime error: " + (err.message || String(err));
+            console.error(err);
+            return;
+        }
+
+        if (_stderrBuf.trim()) {
+            _vizLines.push(_stderrBuf);
+            _stderrBuf = "";
+        }
+
+        const steps = parseVizTrace(_vizLines, _stdout);
+        if (steps.length === 0) {
+            statusEl.textContent = "No VIZ steps — check console.";
+            return;
+        }
+
+        statusEl.textContent = "Ready — " + steps.length + " steps.";
+        document.getElementById("step-slider").disabled = false;
+        document.getElementById("prev-btn").disabled    = false;
+        document.getElementById("next-btn").disabled    = false;
+        Visualizer.loadTrace(steps);
+    });
+}
+
+/* ---- Wire up tabs and start ---- */
+document.addEventListener("DOMContentLoaded", () => {
+    Visualizer.init();
+
+    document.querySelectorAll(".ex-tab").forEach(btn => {
+        btn.addEventListener("click", () => loadExample(btn.dataset.example));
+    });
+
+    // Auto-load the first example
+    loadExample("loop");
+});
+</script>
+</body>
+</html>
