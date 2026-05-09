@@ -65,6 +65,7 @@ include("software3d")
 include("module-test")
 include("wasm-sab")
 include("emscripten")
+include("visualizer")
 
 gradle.allprojects {
     apply<WarPlugin>()

@@ -1,1 +1,2 @@
 org.teavm.classlib.support.ReflectionSupplierImpl
+org.teavm.visualizer.support.VisualizerReflectionSupplier

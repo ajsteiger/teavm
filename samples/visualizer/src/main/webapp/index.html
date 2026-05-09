@@ -1,0 +1,378 @@
+<!--
+    Copyright 2026 Alexey Andreev.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+         http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Java Visualizer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ================================================================ -->
+<!--  Toolbar                                                          -->
+<!-- ================================================================ -->
+<div id="toolbar">
+  <h1>☕ Java Visualizer</h1>
+
+  <button id="run-btn">▶ Run</button>
+
+  <button id="prev-btn" disabled>«</button>
+  <span   id="step-counter">–</span>
+  <button id="next-btn" disabled>»</button>
+
+  <input id="step-slider" type="range" min="0" max="0" value="0" disabled>
+
+  <span id="status-msg"></span>
+</div>
+
+<!-- ================================================================ -->
+<!--  Three-panel workspace                                            -->
+<!-- ================================================================ -->
+<div id="workspace">
+
+  <!-- Panel 1 – code editor -->
+  <div class="panel" id="editor-panel">
+    <div class="panel-header">Java Source</div>
+    <div id="example-tabs">
+      <span class="ex-tabs-label">Examples:</span>
+      <button class="ex-tab" data-example="loop">① Loop &amp; Vars</button>
+      <button class="ex-tab" data-example="recursion">② Recursion</button>
+      <button class="ex-tab active" data-example="multiclass">③ Multi-class</button>
+      <button class="ex-tab" data-example="custom">✏ Custom</button>
+      <button class="ex-tab" data-example="linkedlist">④ Linked List</button>
+    </div>
+    <div id="editor-container">
+      <pre id="editor-highlight" aria-hidden="true"></pre>
+      <textarea id="editor" spellcheck="false">class MathHelper {
+    static int factorial(int n) {
+        int result = 1;
+        int i = 2;
+        while (i &lt;= n) {
+            result = result * i;
+            i = i + 1;
+        }
+        return result;
+    }
+    static int choose(int n, int k) {
+        int nFact = factorial(n);
+        int kFact = factorial(k);
+        int nkFact = factorial(n - k);
+        return nFact / (kFact * nkFact);
+    }
+}
+public class Main {
+    public static void main(String[] args) {
+        int c42 = MathHelper.choose(4, 2);
+        int c53 = MathHelper.choose(5, 3);
+        int c63 = MathHelper.choose(6, 3);
+        System.out.println("C(4,2) = " + c42);
+        System.out.println("C(5,3) = " + c53);
+        System.out.println("C(6,3) = " + c63);
+    }
+}</textarea>
+      <div id="editor-overlay"></div>
+    </div>
+    <div id="compiler-progress">
+      <span class="spinner"></span>
+      <span id="progress-label">Compiling…</span>
+    </div>
+    <div id="diagnostics-panel"></div>
+  </div>
+
+  <!-- Panel 2 – frames & locals -->
+  <div class="panel" id="frames-panel">
+    <div class="panel-header">Frames &amp; Locals</div>
+    <div id="frames-body">
+      <div class="info-msg">Press ▶ Run to start</div>
+    </div>
+  </div>
+
+  <!-- Panel 3 – heap -->
+  <div class="panel" id="heap-panel">
+    <div class="panel-header">Heap</div>
+    <div id="heap-svg-container">
+      <svg id="heap-svg" xmlns="http://www.w3.org/2000/svg" width="300" height="60">
+        <text x="20" y="36" font-size="12" fill="#999">Heap objects will appear here</text>
+      </svg>
+    </div>
+  </div>
+
+  <!-- Stdout panel – spans all columns (row 2) -->
+  <div class="panel" id="stdout-panel">
+    <div class="panel-header">Output</div>
+    <pre id="stdout-body"></pre>
+  </div>
+
+</div><!-- #workspace -->
+
+<!-- ================================================================ -->
+<!--  Scripts                                                          -->
+<!-- ================================================================ -->
+<script src="visualizer.js?v=2"></script>
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ */
+/*  Worker management                                                   */
+/* ------------------------------------------------------------------ */
+let worker = null;
+
+function ensureWorker() {
+    if (worker) {
+        worker.terminate();
+    }
+    worker = new Worker("worker.js?v=" + Date.now());
+    worker.onmessage = handleWorkerMessage;
+    worker.onerror   = (e) => {
+        setStatus("Worker error: " + e.message);
+        setProgress(false);
+    };
+}
+
+/* ------------------------------------------------------------------ */
+/*  Worker message handling                                             */
+/* ------------------------------------------------------------------ */
+function handleWorkerMessage(event) {
+    const msg = event.data;
+    switch (msg.type) {
+        case "status":
+            setStatus(msg.message);
+            break;
+
+        case "diagnostic":
+            showDiagnostic(msg);
+            break;
+
+        case "trace-complete":
+            setProgress(false);
+            document.getElementById("step-slider").disabled = false;
+            document.getElementById("prev-btn").disabled = false;
+            document.getElementById("next-btn").disabled = false;
+            if (msg.truncated) {
+                setStatus("Trace truncated at max steps.");
+            } else {
+                setStatus("Ready — " + msg.trace.length + " steps.");
+            }
+            clearDiagnostics();
+            Visualizer.loadTrace(msg.trace);
+            break;
+
+        case "error":
+            setProgress(false);
+            setStatus("Error: " + msg.message);
+            break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Run button                                                          */
+/* ------------------------------------------------------------------ */
+document.getElementById("run-btn").addEventListener("click", () => {
+    const source    = document.getElementById("editor").value;
+    const mainClass = detectMainClass(source) || "Main";
+
+    clearDiagnostics();
+    setProgress(true, "Compiling…");
+    setStatus("Starting…");
+    document.getElementById("step-slider").disabled = true;
+    document.getElementById("prev-btn").disabled    = true;
+    document.getElementById("next-btn").disabled    = true;
+
+    ensureWorker();
+    worker.postMessage({ type: "compile", source, mainClass });
+});
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                             */
+/* ------------------------------------------------------------------ */
+function setStatus(msg) {
+    document.getElementById("status-msg").textContent = msg;
+}
+
+function setProgress(visible, label) {
+    const el = document.getElementById("compiler-progress");
+    if (visible) {
+        el.classList.add("visible");
+        document.getElementById("progress-label").textContent = label || "Working…";
+        document.getElementById("run-btn").disabled = true;
+    } else {
+        el.classList.remove("visible");
+        document.getElementById("run-btn").disabled = false;
+    }
+}
+
+function clearDiagnostics() {
+    document.getElementById("diagnostics-panel").innerHTML = "";
+}
+
+function showDiagnostic(d) {
+    const panel = document.getElementById("diagnostics-panel");
+    const row   = document.createElement("div");
+    const cls   = d.severity === "error" ? "error-msg" : "info-msg";
+    row.className = cls;
+    const loc = d.fileName
+        ? `${d.fileName}:${d.lineNumber}:${d.columnNumber}  `
+        : "";
+    row.textContent = loc + d.message;
+    panel.appendChild(row);
+}
+
+function detectMainClass(source) {
+    const pkgMatch = /^\s*package\s+([\w.]+)\s*;/m.exec(source);
+    const pkg = pkgMatch ? pkgMatch[1] + "." : "";
+    const m = /\bpublic\s+(?:(?:abstract|final|strictfp)\s+)*class\s+(\w+)/.exec(source);
+    return m ? pkg + m[1] : null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Example presets & tab switching                                    */
+/* ------------------------------------------------------------------ */
+const EXAMPLES = {
+    loop: `public class HelloLoop {
+    public static void main(String[] args) {
+        int sum = 0;
+        int i = 1;
+        while (i <= 5) {
+            sum = sum + i;
+            i = i + 1;
+        }
+        System.out.println("Sum 1..5 = " + sum);
+    }
+}`,
+    recursion: `public class Fibonacci {
+    public static int fib(int n) {
+        if (n <= 1) { return n; }
+        int a = fib(n - 1);
+        int b = fib(n - 2);
+        return a + b;
+    }
+    public static void main(String[] args) {
+        for (int i = 0; i <= 6; i++) {
+            System.out.println("fib(" + i + ") = " + fib(i));
+        }
+    }
+}`,
+    multiclass: `class MathHelper {
+    static int factorial(int n) {
+        int result = 1;
+        int i = 2;
+        while (i <= n) {
+            result = result * i;
+            i = i + 1;
+        }
+        return result;
+    }
+    static int choose(int n, int k) {
+        int nFact = factorial(n);
+        int kFact = factorial(k);
+        int nkFact = factorial(n - k);
+        return nFact / (kFact * nkFact);
+    }
+}
+public class Main {
+    public static void main(String[] args) {
+        int c42 = MathHelper.choose(4, 2);
+        int c53 = MathHelper.choose(5, 3);
+        int c63 = MathHelper.choose(6, 3);
+        System.out.println("C(4,2) = " + c42);
+        System.out.println("C(5,3) = " + c53);
+        System.out.println("C(6,3) = " + c63);
+    }
+}`,
+    linkedlist: `class Node {
+    int value;
+    Node next;
+
+    Node(int value, Node next) {
+        this.value = value;
+        this.next = next;
+    }
+}
+
+public class LinkedListDemo {
+    public static void main(String[] args) {
+        Node n1 = new Node(99, null);
+        Node n2 = new Node(17, n1);
+        Node n3 = new Node(42, n2);
+        Node head = n3;
+
+        int sum = 0;
+        Node current = head;
+        while (current != null) {
+            sum = sum + current.value;
+            current = current.next;
+        }
+        System.out.println("Sum = " + sum);
+
+        int max = head.value;
+        current = head.next;
+        while (current != null) {
+            if (current.value > max) {
+                max = current.value;
+            }
+            current = current.next;
+        }
+        System.out.println("Max = " + max);
+    }
+}`,
+};
+
+function resetVisualizerState() {
+    if (worker) { worker.terminate(); worker = null; }
+    setProgress(false);
+    setStatus("");
+    clearDiagnostics();
+    document.getElementById("step-slider").disabled = true;
+    document.getElementById("prev-btn").disabled    = true;
+    document.getElementById("next-btn").disabled    = true;
+    document.getElementById("step-slider").value    = 0;
+    document.getElementById("step-counter").textContent = "–";
+    document.getElementById("stdout-body").textContent  = "";
+    document.getElementById("frames-body").innerHTML =
+        '<div class="info-msg">Press ▶ Run to start</div>';
+    // Re-initialise visualizer state (listeners are guarded against double-registration)
+    Visualizer.init();
+}
+
+document.getElementById("example-tabs").addEventListener("click", (e) => {
+    const btn = e.target.closest(".ex-tab");
+    if (!btn) return;
+    document.querySelectorAll(".ex-tab").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    const key = btn.dataset.example;
+    if (key !== "custom") {
+        document.getElementById("editor").value = EXAMPLES[key];
+        resetVisualizerState();
+    }
+});
+
+// Switch to Custom tab when user edits the source
+document.getElementById("editor").addEventListener("input", () => {
+    const tabs = document.querySelectorAll(".ex-tab");
+    tabs.forEach(b => b.classList.remove("active"));
+    document.querySelector('.ex-tab[data-example="custom"]').classList.add("active");
+});
+
+/* ------------------------------------------------------------------ */
+/*  Initialise visualizer                                               */
+/* ------------------------------------------------------------------ */
+Visualizer.init();
+</script>
+
+</body>
+</html>
