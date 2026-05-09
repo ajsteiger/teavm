@@ -189,7 +189,7 @@ public final class StepRecorder {
 
     /**
      * Percent-encodes characters that are structurally significant in the VIZ
-     * object-literal format: {@code ,} {@code {} {@code }} and newlines.
+     * object-literal format: {@code ,}, {@code \{}, {@code \}} and newlines.
      * This keeps each {@code captureRef} value on exactly one line and
      * unambiguously parseable by the JS heap parser.
      */
