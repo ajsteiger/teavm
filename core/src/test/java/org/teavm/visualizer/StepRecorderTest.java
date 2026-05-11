@@ -18,6 +18,9 @@ package org.teavm.visualizer;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -199,6 +202,14 @@ public class StepRecorderTest {
         StepRecorder.captureVar("x", 99);
     }
 
+    @Test
+    public void captureRef_objectArray_serializesWithoutReflectionShape() {
+        String output = captureStderr(() ->
+                StepRecorder.captureRef("args", new String[] { "alpha", "beta" }));
+
+        assertEquals("\u0000VIZ:var:args=[alpha, beta]" + System.lineSeparator(), output);
+    }
+
     // ------------------------------------------------------------------
     //  reset() (used by tests; verifies the reset helper itself)
     // ------------------------------------------------------------------
@@ -245,5 +256,17 @@ public class StepRecorderTest {
     @Test
     public void maxSteps_isAtLeastThousand() {
         assertTrue(StepRecorder.MAX_STEPS >= 1000);
+    }
+
+    private static String captureStderr(Runnable action) {
+        PrintStream previous = System.err;
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (PrintStream capture = new PrintStream(bytes, true, StandardCharsets.UTF_8)) {
+            System.setErr(capture);
+            action.run();
+        } finally {
+            System.setErr(previous);
+        }
+        return bytes.toString(StandardCharsets.UTF_8);
     }
 }
