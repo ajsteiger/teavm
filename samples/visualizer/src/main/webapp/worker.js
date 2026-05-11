@@ -64,10 +64,11 @@
 /* ------------------------------------------------------------------ */
 /*  Configuration                                                       */
 /* ------------------------------------------------------------------ */
-const COMPILER_RUNTIME_URL = "playground/compiler.wasm-runtime.js";
-const COMPILER_WASM_URL    = "playground/compiler.wasm";
-const SDK_URL              = "playground/compile-classlib-teavm.bin";
-const CLASSLIB_URL         = "playground/runtime-classlib-teavm.bin";
+const ASSET_VERSION        = "heap-viz-array-capture-v1";
+const COMPILER_RUNTIME_URL = versionedUrl("playground/compiler.wasm-runtime.js");
+const COMPILER_WASM_URL    = versionedUrl("playground/compiler.wasm");
+const SDK_URL              = versionedUrl("playground/compile-classlib-teavm.bin");
+const CLASSLIB_URL         = versionedUrl("playground/runtime-classlib-teavm.bin");
 
 /** Maximum number of steps the instrumented program may record. */
 const MAX_STEPS = 10_000;
@@ -102,7 +103,7 @@ async function ensureCompiler() {
     //    same-origin issues when the runtime JS is on a different origin.
     let runtimeText;
     try {
-        const resp = await fetch(COMPILER_RUNTIME_URL);
+        const resp = await fetch(COMPILER_RUNTIME_URL, { cache: "no-store" });
         if (!resp.ok) {
             throw new Error(`HTTP ${resp.status} fetching compiler runtime`);
         }
@@ -128,8 +129,8 @@ async function ensureCompiler() {
 
     postStatus("Loading class library…");
     const [sdkResp, classlibResp] = await Promise.all([
-        fetch(SDK_URL),
-        fetch(CLASSLIB_URL),
+        fetch(SDK_URL, { cache: "no-store" }),
+        fetch(CLASSLIB_URL, { cache: "no-store" }),
     ]);
     if (!sdkResp.ok) {
         throw new Error(`HTTP ${sdkResp.status} fetching SDK`);
@@ -378,6 +379,10 @@ function detectClassName(source) {
     const pkg = pkgMatch ? pkgMatch[1] + "." : "";
     const m = /\bpublic\s+(?:(?:abstract|final|strictfp)\s+)*class\s+(\w+)/.exec(source);
     return m ? pkg + m[1] : null;
+}
+
+function versionedUrl(url) {
+    return `${url}?v=${ASSET_VERSION}`;
 }
 
 function postStatus(message) {
