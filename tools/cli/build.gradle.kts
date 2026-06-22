@@ -37,6 +37,7 @@ dependencies {
 tasks {
     shadowJar {
         mergeServiceFiles()
+        relocate("org.apache.commons", "org.teavm.apachecommons")
         manifest {
             attributes(
                     "Main-Class" to "org.teavm.cli.TeaVMRunner"
